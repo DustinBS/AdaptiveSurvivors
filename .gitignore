@@ -1,0 +1,8 @@
+# Ignore the GameClient directory as it's a Git submodule.
+# Its contents are managed by its own Git repository.
+GameClient/
+
+# General ignores for the parent repo
+.env
+.DS_Store
+*.log
