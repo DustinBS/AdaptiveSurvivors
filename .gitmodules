@@ -1,0 +1,3 @@
+[submodule "GameClient"]
+	path = GameClient
+	url = https://github.com/DustinBS/AdaptiveSurvivors-GameClient
