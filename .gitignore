@@ -4,3 +4,7 @@
 .env
 .DS_Store
 *.log
+
+# Docker Volume Data and Logs
+data/
+logs/
