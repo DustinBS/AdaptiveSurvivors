@@ -116,14 +116,22 @@ object PlayerProfileAndAdaptiveParametersJob {
 
     // 3. Create a DataStream from the Kafka source
     val gameplayEventStream: DataStream[GameplayEvent] = env
-      .fromSource(gameplayEventsSource, WatermarkStrategy
-        .forBoundedOutOfOrderness(Duration.ofSeconds(5)) // Allow events to be out of order by 5 seconds
-        .withTimestampAssigner(TimestampAssignerSupplier.of((event: GameplayEvent, timestamp: Long) => event.timestamp)), // Assign event timestamp
+      .fromSource(
+        gameplayEventsSource.asInstanceOf[org.apache.flink.api.connector.source.Source[java.io.Serializable, _ <: org.apache.flink.api.connector.source.SourceSplit, _]],
+        WatermarkStrategy
+          .forBoundedOutOfOrderness(Duration.ofSeconds(5)) // Allow events to be out of order by 5 seconds
+          .withTimestampAssigner(
+            new org.apache.flink.api.common.eventtime.SerializableTimestampAssigner[GameplayEvent] {
+              override def extractTimestamp(element: GameplayEvent, recordTimestamp: Long): Long = {
+                element.timestamp
+              }
+            }
+          ).asInstanceOf[org.apache.flink.api.common.eventtime.WatermarkStrategy[java.io.Serializable]], // <--- ADD THIS CAST
         "Kafka Gameplay Events Source"
       )
       .map { jsonString =>
         try {
-          GSON.fromJson(jsonString, classOf[GameplayEvent])
+          GSON.fromJson(jsonString.asInstanceOf[String], classOf[GameplayEvent])
         } catch {
           case e: Exception =>
             println(s"Error parsing JSON: $jsonString - ${e.getMessage}")
@@ -142,7 +150,7 @@ object PlayerProfileAndAdaptiveParametersJob {
       .map(new PlayerProfileAndAdaptiveParametersUpdater())
 
     // 6. Configure Kafka Sink for adaptive_params
-    val adaptiveParamsSink = KafkaSink.builder[AdaptiveParameters]()
+    val adaptiveParamsSink = KafkaSink.builder[String]()
       .setBootstrapServers(kafkaBootstrapServers)
       .setRecordSerializer(KafkaRecordSerializationSchema.builder()
         .setTopic("adaptive_params")
@@ -183,16 +191,30 @@ object PlayerProfileAndAdaptiveParametersJob {
       // Get current player profile or create a new one if it doesn't exist
       val currentProfile = Option(playerProfileState.value()) match {
         case Some(profile) => profile
-        case None => PlayerProfile(event.player_id)
+        case None          => PlayerProfile(event.player_id)
       }
 
       // --- Update Player Profile based on the event ---
       event.event_type match {
         case "player_movement_event" =>
-          // For simplicity, let's say a certain movement pattern influences commonDodgeVector
-          // In a real scenario, this would involve more complex analysis (e.g., sequences of movements)
-          val dirX = event.payload.getOrDefault("dir", new java.util.HashMap[String, Double]()).asInstanceOf[java.util.Map[String, Double]].getOrDefault("dx", 0.0)
-          val dirY = event.payload.getOrDefault("dir", new java.util.HashMap[String, Double]()).asInstanceOf[java.util.Map[String, Double]].getOrDefault("dy", 0.0)
+          // Safely extract the nested 'dir' map
+          val dirPayload = event.payload.get("dir") match {
+            case m: java.util.Map[_, _] => m.asInstanceOf[java.util.Map[String, AnyRef]]
+            case _                      => new java.util.HashMap[String, AnyRef]() // Default to an empty map
+          }
+
+          // Safely extract dx and dy, handling different numeric types from JSON
+          val dirX = dirPayload.get("dx") match {
+            case d: java.lang.Double  => d.doubleValue()
+            case i: java.lang.Integer => i.doubleValue()
+            case _                    => 0.0
+          }
+
+          val dirY = dirPayload.get("dy") match {
+            case d: java.lang.Double  => d.doubleValue()
+            case i: java.lang.Integer => i.doubleValue()
+            case _                    => 0.0
+          }
 
           if (dirX > 0.5) currentProfile.commonDodgeVector = "right"
           else if (dirX < -0.5) currentProfile.commonDodgeVector = "left"
@@ -207,102 +229,92 @@ object PlayerProfileAndAdaptiveParametersJob {
             currentProfile.playstyleTags -= "Active"
           }
 
-
         case "weapon_hit_event" =>
-          val dmgDealt = event.payload.getOrDefault("dmg_dealt", 0.0).asInstanceOf[Double]
-          val weaponId = event.payload.getOrDefault("weapon_id", "unknown").asInstanceOf[String]
+          val dmgDealt = event.payload.get("dmg_dealt") match {
+            case d: java.lang.Double  => d.doubleValue()
+            case i: java.lang.Integer => i.doubleValue()
+            case _                    => 0.0
+          }
+          val weaponId = event.payload.get("weapon_id") match {
+            case s: String => s
+            case _         => "unknown"
+          }
           currentProfile.totalDamageDealt += dmgDealt
           currentProfile.weaponsUsed = currentProfile.weaponsUsed.updated(weaponId, currentProfile.weaponsUsed.getOrElse(weaponId, 0) + 1)
 
-          // Example: If a lot of damage is dealt, player might be "Aggressive"
           if (currentProfile.totalDamageDealt > 1000) {
             currentProfile.playstyleTags += "Aggressive"
-            currentProfile.playstyleTags -= "Kiting" // Remove if previously Kiting
+            currentProfile.playstyleTags -= "Kiting"
           }
 
         case "damage_taken_event" =>
-          val dmgAmount = event.payload.getOrDefault("dmg_amount", 0.0).asInstanceOf[Double]
+          val dmgAmount = event.payload.get("dmg_amount") match {
+            case d: java.lang.Double  => d.doubleValue()
+            case i: java.lang.Integer => i.doubleValue()
+            case _                    => 0.0
+          }
           currentProfile.totalDamageTaken += dmgAmount
 
-          // Example: If player takes a lot of damage, they might be "Reckless"
           if (currentProfile.totalDamageTaken > 500) {
             currentProfile.playstyleTags += "Reckless"
           }
 
         case "upgrade_choice_event" =>
-          // Logic for influencing playstyle based on upgrade choices
-          val chosenUpgradeId = event.payload.getOrDefault("chosen_upgrade_id", "none").asInstanceOf[String]
+          val chosenUpgradeId = event.payload.get("chosen_upgrade_id") match {
+            case s: String => s
+            case _         => "none"
+          }
           if (chosenUpgradeId.contains("speed")) currentProfile.playstyleTags += "Kiting"
           if (chosenUpgradeId.contains("armor")) currentProfile.playstyleTags += "Defensive"
 
         case "enemy_death_event" =>
-          // Logic for tracking enemy types killed, efficiency etc.
-          val killedByWeaponId = event.payload.getOrDefault("killed_by_weapon_id", "unknown").asInstanceOf[String]
+          val killedByWeaponId = event.payload.get("killed_by_weapon_id") match {
+            case s: String => s
+            case _         => "unknown"
+          }
           currentProfile.weaponsUsed = currentProfile.weaponsUsed.updated(killedByWeaponId, currentProfile.weaponsUsed.getOrElse(killedByWeaponId, 0) + 1)
 
         case "breakable_object_destroyed_event" =>
-          // Track types of objects destroyed for adaptation mechanics
-          val objType = event.payload.getOrDefault("obj_type", "unknown").asInstanceOf[String]
-          // You could add a map to PlayerProfile for object destruction counts
-          // currentProfile.objectDestructionCounts = currentProfile.objectDestructionCounts.updated(objType, currentProfile.objectDestructionCounts.getOrElse(objType, 0) + 1)
+          val objType = event.payload.get("obj_type") match {
+            case s: String => s
+            case _         => "unknown"
+          }
+          // Your logic for object destruction counts would go here
 
         case _ => // Handle other event types or ignore
       }
 
       currentProfile.lastUpdated = System.currentTimeMillis()
-      // Update the state with the modified profile
       playerProfileState.update(currentProfile)
 
       // --- Generate Adaptive Parameters based on the updated Player Profile ---
-      // This is where the core adaptive logic resides.
-      // The examples below are simplified implementations of the GDD's adaptation mechanics.
-
       var enemyResistances: Map[String, Double] = Map.empty
       var eliteBehaviorShift: String = "none"
       var eliteStatusImmunities: Set[String] = Set.empty
       var breakableObjectBuffsDebuffs: Map[String, String] = Map.empty
 
-      // Elite - Weapon Resistance: Gains 25% damage reduction vs. player's current top_3_effective_weapons.
       if (currentProfile.weaponsUsed.nonEmpty) {
-        // Find top 3 weapons by usage count
         val topWeapons = currentProfile.weaponsUsed.toSeq.sortBy(-_._2).take(3).map(_._1)
         topWeapons.foreach(weaponId => {
-          enemyResistances = enemyResistances.updated(weaponId, 0.25) // 25% damage reduction
+          enemyResistances = enemyResistances.updated(weaponId, 0.25)
         })
       }
 
-      // Elite - Dodge Prediction (Simplified): If commonDodgeVector is strong, Elites might anticipate.
       currentProfile.commonDodgeVector match {
         case "left" | "right" | "forward" | "backward" =>
           eliteBehaviorShift = "anticipate_" + currentProfile.commonDodgeVector
-        case _ => // no specific dodge prediction
+        case _ =>
       }
 
-      // Elite - Behavior Shift: Speed/aggression adapts to player's playstyle_tags.
       if (currentProfile.playstyleTags.contains("Aggressive")) {
         eliteBehaviorShift = "speed_aggression_boost"
       } else if (currentProfile.playstyleTags.contains("Kiting")) {
         eliteBehaviorShift = "temporary_slow_on_hit"
       }
 
-      // Elite - Status Immunity: Temporary immunity to player's heavily used status effects.
-      // This would require tracking player's status effect usage, which is not yet in PlayerProfile.
-      // For demonstration, let's assume if player is very aggressive, Elites might gain freeze immunity.
       if (currentProfile.playstyleTags.contains("Aggressive") && currentProfile.totalDamageDealt > 2000) {
         eliteStatusImmunities += "freeze"
       }
-
-      // Adaptive Breakable Objects (Player Buff/Debuff) - Simplified
-      // This needs more detailed tracking in PlayerProfile for "destruction affinity".
-      // Example: if player breaks many "Tombstones" (hypothetical tracking)
-      // if (currentProfile.objectDestructionCounts.getOrElse("Tombstone", 0) > 10) {
-      //   breakableObjectBuffsDebuffs = breakableObjectBuffsDebuffs.updated("Tombstone", "-5%_move_speed_debuff")
-      // }
-      // Example: if player breaks many "Bushes"
-      // if (currentProfile.objectDestructionCounts.getOrElse("Bush", 0) > 10) {
-      //   breakableObjectBuffsDebuffs = breakableObjectBuffsDebuffs.updated("Bush", "+10%_speed_buff")
-      // }
-
 
       AdaptiveParameters(
         playerId = currentProfile.playerId,

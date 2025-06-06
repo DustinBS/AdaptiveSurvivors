@@ -2,12 +2,14 @@
 
 A multiplayer survival game built with Unity and cloud backend.
 
-## Prerequisites
+## Prerequisites (for development)
 
 - **Git**
 - **Unity 6 LTS**
 - **Docker Desktop**
 - **Node.js v22.13.0 LTS**
+- **JDK 17.0.15**
+- **Maven 3.9.10**
 
 ## Quick Start
 

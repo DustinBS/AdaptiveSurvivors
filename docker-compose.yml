@@ -110,6 +110,7 @@ services:
       FLINK_REST_ADDRESS: 0.0.0.0
       FLINK_BIND_HOST: 0.0.0.0
       JOB_MANAGER_RPC_ADDRESS: jobmanager
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     env_file:
       - ./.env
     volumes:
@@ -129,6 +130,7 @@ services:
     environment:
       FLINK_TASK_MANAGER_NUMBER_OF_TASK_SLOTS: 1
       FLINK_PROPERTIES: "jobmanager.rpc.address: jobmanager"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     env_file:
       - ./.env
     volumes:
@@ -139,7 +141,8 @@ services:
 
   # Kafka Connect: Ingests data to/from Kafka using various connectors.
   kafka-connect:
-    image: confluentinc/cp-kafka-connect:7.0.1
+    build:
+      context: ./Backend/KafkaConnect
     hostname: kafka-connect
     container_name: kafka-connect
     ports:
