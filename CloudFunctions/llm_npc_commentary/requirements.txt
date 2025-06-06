@@ -1,0 +1,5 @@
+# CloudFunctions/llm_npc_commentary/requirements.txt
+google-cloud-bigquery==3.12.0
+google-cloud-aiplatform==1.38.1
+Flask==2.3.2 # For HTTP server
+requests==2.31.0 # For making HTTP requests to Gemini API (though aiplatform client handles it)

@@ -89,3 +89,70 @@ AdaptiveSurvivors/
 ├── GameClient/        # Unity project (submodule)
 └── docker-compose.yml, .env.example, other files
 ```
+
+## Planned Architecture
+```mermaid
+graph TD
+    %% Define Node Styles
+    classDef process fill:#e1f5fe,stroke:#4fc3f7,stroke-width:2px;
+    classDef datastore fill:#e8f5e9,stroke:#66bb6a,stroke-width:2px,shape:cylinder;
+    classDef cloud fill:#fff3e0,stroke:#ffb74d,stroke-width:2px;
+    classDef gcp_datastore fill:#fbe9e7,stroke:#ff8a65,stroke-width:2px,shape:cylinder;
+
+    %% Main Actor
+    UnityClient["Unity Game Client (C#)"]
+
+    subgraph Local Development Environment
+        direction LR
+
+        subgraph Real-time Processing
+            direction TB
+            Kafka[("Apache Kafka Bus")]:::datastore
+            Flink["Apache Flink Consumer"]:::process
+        end
+
+        subgraph Batch Ingestion & Processing
+            direction TB
+            Connect["Kafka Connect"]:::process
+            HDFS[("HDFS Data Lake")]:::datastore
+            Spark["Apache Spark Job"]:::process
+        end
+    end
+
+    subgraph "Google Cloud Platform (GCP)"
+        direction TB
+        CloudFunc["Cloud Function (LLM NPC)"]:::cloud
+        GeminiAPI["Gemini 1.5 Flash API"]:::cloud
+
+        subgraph BigQuery Warehouse
+            BQ_Raw[("BQ Staging: gameplay_events_raw")]:::gcp_datastore
+            BQ_Hist[("BQ History: gameplay_events_history")]:::gcp_datastore
+            BQ_LLM[("BQ Prompts: llm_npc_prompts")]:::gcp_datastore
+        end
+    end
+
+    %% --- Define The Connections ---
+
+    %% Real-time Gameplay & Adaptation Loop
+    UnityClient -->|"Gameplay Events (JSON)"| Kafka;
+    Kafka -->|"Topic: gameplay_events"| Flink;
+    Flink -->|"Topic: adaptive_params"| Kafka;
+    Kafka -->|"Real-time Adaptive Params"| UnityClient;
+
+    %% Raw Data Lake Ingestion (Batch)
+    Kafka -->|"Topics: gameplay_events & adaptive_params"| Connect;
+    Connect -->|"Batched Writes"| HDFS;
+
+    %% Background Data Processing to Cloud
+    HDFS -->|"Round-End Batch Read"| Spark;
+    Spark -->|"Loads Transformed Data"| BQ_Raw;
+    BQ_Raw -->|"SQL ETL"| BQ_Hist;
+    BQ_Hist -->|"SQL Aggregation"| BQ_LLM;
+
+    %% On-Demand LLM NPC Commentary
+    UnityClient -.->|"On-Dialogue HTTP Request"| CloudFunc;
+    CloudFunc -->|"Reads Run Summary"| BQ_LLM;
+    CloudFunc -->|"Calls LLM"| GeminiAPI;
+    GeminiAPI -->|"Returns Dialogue"| CloudFunc;
+    CloudFunc -.->|"Returns Dialogue (JSON)"| UnityClient;
+```
