@@ -1,10 +1,11 @@
+# Path: docker-compose.yml
 # AdaptiveSurvivors/docker-compose.yml
 
-# This file orchestrates the local development environment for the Adaptive Survivors backend.
-# It sets up Kafka, Zookeeper, HDFS, Flink, Spark, and Kafka Connect.
+# Orchestrates the local development environment for the Adaptive Survivors backend.
+# Sets up Kafka, Zookeeper, HDFS, Flink, and Spark.
 
 services:
-  # Zookeeper: Required for Kafka.
+  # Zookeeper: Manages metadata for Kafka.
   zookeeper:
     image: confluentinc/cp-zookeeper:7.0.1
     hostname: zookeeper
@@ -15,22 +16,22 @@ services:
       ZOOKEEPER_CLIENT_PORT: ${ZOO_CLIENT_PORT}
       ZOOKEEPER_TICK_TIME: 2000
     volumes:
-      - ./data/zookeeper:/var/lib/zookeeper/data
-      - ./logs/zookeeper:/var/log/zookeeper
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/log/zookeeper
     healthcheck:
       test: ["CMD-SHELL", "echo stat | nc localhost ${ZOO_CLIENT_PORT}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Kafka: Message broker for real-time event streaming.
+  # Kafka: The event streaming platform.
   kafka:
     image: confluentinc/cp-kafka:7.0.1
     hostname: kafka
     container_name: kafka
     ports:
-      - "29092:29092" # Port for clients outside the Docker network
-      - "9092:9092"   # Port for clients inside the Docker network
+      - "29092:29092" # External client port
+      - "9092:9092"   # Internal Docker network port
     environment:
       KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
       KAFKA_ZOOKEEPER_CONNECT: ${KAFKA_ZOOKEEPER_CONNECT}
@@ -42,8 +43,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
     volumes:
-      - ./data/kafka:/var/lib/kafka/data
-      - ./logs/kafka:/var/log/kafka
+      - kafka_data:/var/lib/kafka/data
+      - kafka_logs:/var/log/kafka
     depends_on:
       zookeeper:
         condition: service_healthy
@@ -53,16 +54,17 @@ services:
       timeout: 5s
       retries: 5
 
-  # HDFS Namenode: Manages the Hadoop Distributed File System.
+  # HDFS Namenode: Manages the HDFS file system namespace.
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     hostname: namenode
     container_name: namenode
     ports:
-      - "9870:9870" # Web UI for Namenode
+      - "9870:9870" # Web UI
     environment:
       - CLUSTER_NAME=test-cluster
-      - CORE_SITE_FS_DEFAULT_NAME=${CORE_SITE_FS_DEFAULT_NAME} # Using env variable
+      # The bde2020 image uses CORE_CONF_fs_defaultFS to generate the core-site.xml file.
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
     env_file:
       - ./.env
     volumes:
@@ -74,13 +76,13 @@ services:
       timeout: 10s
       retries: 3
 
-  # HDFS Datanode: Stores the actual data blocks.
+  # HDFS Datanode: Stores the actual data blocks in HDFS.
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     hostname: datanode
     container_name: datanode
     environment:
-      - CORE_SITE_FS_DEFAULT_NAME=${CORE_SITE_FS_DEFAULT_NAME} # Using env variable
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
     env_file:
       - ./.env
     volumes:
@@ -113,7 +115,7 @@ services:
     volumes:
       - ./logs/flink:/opt/flink/log
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8081"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8081 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -125,9 +127,8 @@ services:
     container_name: taskmanager
     command: taskmanager
     environment:
-      FLINK_PROPERTIES_FILE: /opt/flink/conf/flink-conf.yaml
-      FLINK_JOB_MANAGER_RPC_ADDRESS: jobmanager
       FLINK_TASK_MANAGER_NUMBER_OF_TASK_SLOTS: 1
+      FLINK_PROPERTIES: "jobmanager.rpc.address: jobmanager"
     env_file:
       - ./.env
     volumes:
@@ -136,19 +137,22 @@ services:
       jobmanager:
         condition: service_healthy
 
-  # Kafka Connect: For ingesting data from Kafka to HDFS.
+  # Kafka Connect: Ingests data to/from Kafka using various connectors.
   kafka-connect:
     image: confluentinc/cp-kafka-connect:7.0.1
     hostname: kafka-connect
     container_name: kafka-connect
     ports:
-      - "8083:8083" # Kafka Connect REST API
+      - "8083:8083" # REST API
     environment:
       CONNECT_BOOTSTRAP_SERVERS: ${CONNECT_BOOTSTRAP_SERVERS}
       CONNECT_GROUP_ID: ${CONNECT_GROUP_ID}
       CONNECT_CONFIG_STORAGE_TOPIC: ${CONNECT_CONFIG_STORAGE_TOPIC}
       CONNECT_OFFSET_STORAGE_TOPIC: ${CONNECT_OFFSET_STORAGE_TOPIC}
       CONNECT_STATUS_STORAGE_TOPIC: ${CONNECT_STATUS_STORAGE_TOPIC}
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
@@ -158,10 +162,7 @@ services:
       CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
       CONNECT_LOG4J_LOGGERS: org.apache.kafka.connect.runtime.rest=WARN,org.reflections=WARN
       CONNECT_PLUGIN_PATH: ${CONNECT_PLUGIN_PATH}
-    # Mount the HDFS connector JAR here if it's not included in the image
     volumes:
-      # You might need to add a volume to mount the HDFS connector JAR
-      # - ./connectors/kafka-connect-hdfs-*.jar:/usr/share/java/kafka-connect-hdfs/kafka-connect-hdfs-*.jar
       - ./logs/kafka-connect:/var/log/kafka-connect
     depends_on:
       kafka:
@@ -180,38 +181,28 @@ services:
     hostname: spark-master
     container_name: spark-master
     ports:
-      - "8080:8080" # Spark Master Web UI
-      - "7077:7077" # Spark Master RPC port
+      - "8080:8080" # Web UI
+      - "7077:7077" # RPC port
     command: "/opt/bitnami/spark/bin/spark-class org.apache.spark.deploy.master.Master"
     environment:
       SPARK_MODE: master
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
-      SPARK_DRIVER_MEMORY: 1G
-      SPARK_WORKER_MEMORY: 1G
-      SPARK_WORKER_CORES: 1
       SPARK_MASTER_WEBUI_PORT: 8080
       SPARK_MASTER_PORT: 7077
-      SPARK_PUBLIC_DNS: localhost # Set to your host IP if experiencing connectivity issues
       HADOOP_CONF_DIR: /opt/bitnami/spark/conf
-      # Ensure Hadoop configuration is picked up by Spark for HDFS access
-      # You might need to configure core-site.xml and hdfs-site.xml inside the Spark container
-      # to correctly point to the HDFS Namenode.
-      # This is a placeholder, actual config might require custom Spark image or init scripts.
     env_file:
       - ./.env
     volumes:
       - ./logs/spark:/opt/bitnami/spark/logs
-      # Optional: Mount custom Spark config if needed
-      # - ./Backend/spark/conf:/opt/bitnami/spark/conf
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
 
-  # Spark Worker: Executes tasks assigned by the Spark Master.
+  # Spark Worker: Executes tasks from the Spark Master.
   spark-worker:
     image: bitnami/spark:3.2.0
     hostname: spark-worker
@@ -230,3 +221,10 @@ services:
     depends_on:
       spark-master:
         condition: service_healthy
+
+# Define named volumes for easy cleanup with docker compose down -v.
+volumes:
+  zookeeper_data:
+  zookeeper_logs:
+  kafka_data:
+  kafka_logs:
