@@ -8,8 +8,8 @@ A multiplayer survival game built with Unity and cloud backend.
 - **Unity 6 LTS**
 - **Docker Desktop**
 - **Node.js v22.13.0 LTS**
-- **JDK 17.0.15**
-- **Maven 3.9.10**
+- **JDK 8 LTS** [Adoptium link](https://adoptium.net/temurin/releases/?version=8&os=any&arch=any)
+- **Maven 3.9.10** [Apache Maven link](https://maven.apache.org/download.cgi)
 
 ## Quick Start
 
