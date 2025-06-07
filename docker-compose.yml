@@ -49,7 +49,7 @@ services:
       zookeeper:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
       interval: 10s
       timeout: 5s
       retries: 5
