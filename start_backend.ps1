@@ -6,7 +6,7 @@
 # PS C:\Unity\AdaptiveSurvivors> .\start_backend.ps1
 
 Write-Host "--- Starting Docker Compose Services ---"
-docker-compose up -d
+docker-compose up -d --build
 
 Write-Host "--- Waiting for Zookeeper to be healthy (up to 60 seconds) ---"
 $timeout = New-TimeSpan -Seconds 60
@@ -131,12 +131,19 @@ docker exec jobmanager flink run -d /tmp/AdaptiveSurvivorsFlinkJobs.jar
 
 Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
 try {
-    Invoke-RestMethod -Uri http://localhost:8083/connectors -Method Post -ContentType 'Application/json' -Body (Get-Content -Raw .\Backend\KafkaConnect\connectors\hdfs-sink-gameplay-events.json)
+    try { Invoke-RestMethod -Uri http://localhost:8083/connectors/hdfs-sink-combined-events -Method Delete } catch {}; Invoke-RestMethod -Uri http://localhost:8083/connectors -Method Post -ContentType 'Application/json' -Body (Get-Content -Raw -Path ./Backend/KafkaConnect/connectors/hdfs-sink-gameplay-events.json)
 } catch {
     # This error is expected if the connector already exists, so we just log it as a warning
     Write-Warning "Connector hdfs-sink-gameplay-events might already exist or there was another issue: $($_.Exception.Message)"
 }
 
+Write-Host "--- Creating HDFS directories for Kafka Connect ---"
+docker exec namenode hdfs dfs -mkdir -p /topics
+docker exec namenode hdfs dfs -mkdir -p /logs
+docker exec namenode hdfs dfs -chmod 777 /topics
+docker exec namenode hdfs dfs -chmod 777 /logs
+
+Write-Host "HDFS directories created and permissions set."
 
 Write-Host "--- Backend Services Setup Complete ---"
 Write-Host "You can now run your Unity game and perform actions."

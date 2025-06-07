@@ -65,6 +65,7 @@ services:
       - CLUSTER_NAME=test-cluster
       # The bde2020 image uses CORE_CONF_fs_defaultFS to generate the core-site.xml file.
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
     env_file:
       - ./.env
     volumes:

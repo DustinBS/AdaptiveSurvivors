@@ -1,25 +1,30 @@
 {
-  "name": "hdfs-sink-gameplay-events",
+  "name": "hdfs-sink-combined-events",
   "config": {
     "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
     "tasks.max": "1",
     "topics": "gameplay_events,adaptive_params",
     "hdfs.url": "hdfs://namenode:9000",
-    "flush.size": "10",
-    "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+    "flush.size": "1000",
+    "rotate.interval.ms": "60000",
+    "logs.dir": "/logs",
+
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",
     "schema.compatibility": "NONE",
-    "partitioner.class": "io.confluent.connect.hdfs.partitioner.DailyPartitioner",
-    "path.format": "'/user/kafka-connect/topics'/${topic}/dt='year'-'month'-'day'",
-    "timestamp.extractor": "RecordField",
-    "timestamp.field": "timestamp",
-    "timezone": "UTC",
+
+    "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+
+    "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
+    "partition.duration.ms": "86400000",
+    "path.format": "YYYY-MM-dd",
+
     "locale": "en-US",
-    "logs.dir": "/kafka-connect-logs",
-    "hdfs.authentication.kerberos.enabled": "false",
-    "topic.gameplay_events.partitions.max": "1",
-    "topic.adaptive_params.partitions.max": "1"
+    "timezone": "UTC",
+    "timestamp.extractor": "Record",
+
+    "hdfs.replication.factor": "1",
+    "confluent.topic.replication.factor": "1"
   }
 }
