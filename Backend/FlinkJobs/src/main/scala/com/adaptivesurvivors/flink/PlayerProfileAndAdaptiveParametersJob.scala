@@ -21,6 +21,53 @@ import org.apache.flink.streaming.api.windowing.time.Time
 import java.time.Duration
 import java.util.Properties
 
+import com.google.gson._
+import com.google.gson.reflect.TypeToken
+import com.google.gson.stream.{JsonReader, JsonWriter}
+import java.lang.reflect.ParameterizedType
+
+/**
+ * A custom Gson TypeAdapterFactory to handle Scala Sets correctly.
+ * It ensures that a null or empty Set is always serialized as an empty JSON array `[]`,
+ * which is compatible with C#/.NET deserializers like Newtonsoft.Json.
+ */
+object SetTypeAdapterFactory extends TypeAdapterFactory {
+  override def create[T](gson: Gson, tt: TypeToken[T]): TypeAdapter[T] = {
+    val rawType = tt.getRawType
+    if (!classOf[Set[_]].isAssignableFrom(rawType)) {
+      return null // This factory only handles Sets
+    }
+
+    val elementType = tt.getType.asInstanceOf[ParameterizedType].getActualTypeArguments()(0)
+    val elementTypeAdapter = gson.getAdapter(TypeToken.get(elementType)).asInstanceOf[TypeAdapter[Any]]
+
+    new TypeAdapter[Set[_]] {
+      override def write(out: JsonWriter, value: Set[_]): Unit = {
+        if (value == null || value.isEmpty) {
+          out.beginArray() // Write an empty array for null or empty sets
+          out.endArray()
+        } else {
+          out.beginArray()
+          value.foreach(elem => elementTypeAdapter.write(out, elem))
+          out.endArray()
+        }
+      }
+
+      override def read(in: JsonReader): Set[_] = {
+        // We only need this for serialization, so reading can be left unimplemented or basic.
+        // This job does not read JSON into a Set, so we don't need a complex implementation.
+        in.beginArray()
+        val set = scala.collection.mutable.Set.empty[Any]
+        while (in.hasNext) {
+          set += elementTypeAdapter.read(in)
+        }
+        in.endArray()
+        set.toSet
+      }
+    }.asInstanceOf[TypeAdapter[T]]
+  }
+}
+
 // --- Data Models ---
 // These case classes represent the structure of our JSON events and state.
 
@@ -82,11 +129,41 @@ case class AdaptiveParameters(
 )
 
 /**
+ * A RichMapFunction to parse JSON strings into GameplayEvent objects.
+ * By initializing the Gson instance in the open() method, we ensure that the
+ * non-serializable Gson object is created on the TaskManager, not the JobManager,
+ * thus avoiding "Task not serializable" errors.
+ */
+class JsonToGameplayEventMapper extends RichMapFunction[String, GameplayEvent] {
+  // Declare a transient, lazy Gson instance.
+  // 'transient' tells the serializer to ignore it.
+  // We will initialize it properly in the open() method.
+  @transient private var gson: Gson = _
+
+  override def open(parameters: Configuration): Unit = {
+    // This method is called once per task on the worker node.
+    // It's the perfect place to initialize non-serializable objects.
+    gson = new GsonBuilder()
+      .registerTypeAdapterFactory(SetTypeAdapterFactory)
+      .create()
+  }
+
+  override def map(jsonString: String): GameplayEvent = {
+    try {
+      gson.fromJson(jsonString, classOf[GameplayEvent])
+    } catch {
+      case e: Exception =>
+        println(s"Error parsing JSON: $jsonString - ${e.getMessage}")
+        // Return a dummy event to be filtered out later
+        GameplayEvent("invalid_event", 0L, "unknown", new java.util.HashMap[String, AnyRef]())
+    }
+  }
+}
+
+/**
  * The main Flink job entry point.
  */
 object PlayerProfileAndAdaptiveParametersJob {
-
-  private val GSON = new Gson()
 
   def main(args: Array[String]): Unit = {
     // 1. Setup the Streaming Execution Environment
@@ -114,42 +191,39 @@ object PlayerProfileAndAdaptiveParametersJob {
       .setValueOnlyDeserializer(new SimpleStringSchema())
       .build()
 
-    // 3. Create a DataStream from the Kafka source
-    val gameplayEventStream: DataStream[GameplayEvent] = env
-      .fromSource(
-        gameplayEventsSource.asInstanceOf[org.apache.flink.api.connector.source.Source[java.io.Serializable, _ <: org.apache.flink.api.connector.source.SourceSplit, _]],
+    // 3. Create a DataStream of raw JSON strings from Kafka
+    val rawJsonStream: DataStream[String] = env.fromSource(
+      gameplayEventsSource,
+      WatermarkStrategy.noWatermarks(),
+      "Kafka Gameplay Events Source"
+    )
+
+    // 4. Parse the JSON strings using the new RichMapFunction
+    val gameplayEventStream: DataStream[GameplayEvent] = rawJsonStream
+      .map(new JsonToGameplayEventMapper())
+      .filter(_.event_type != "invalid_event")
+
+    // 5. Assign Timestamps and Watermarks to the typed stream
+    val timedEventStream = gameplayEventStream
+      .assignTimestampsAndWatermarks(
         WatermarkStrategy
-          .forBoundedOutOfOrderness(Duration.ofSeconds(5)) // Allow events to be out of order by 5 seconds
+          .forBoundedOutOfOrderness[GameplayEvent](Duration.ofSeconds(5)) // Allow 5s of lateness
           .withTimestampAssigner(
             new org.apache.flink.api.common.eventtime.SerializableTimestampAssigner[GameplayEvent] {
-              override def extractTimestamp(element: GameplayEvent, recordTimestamp: Long): Long = {
-                element.timestamp
-              }
+              // Extract the timestamp from the event object itself
+              override def extractTimestamp(element: GameplayEvent, recordTimestamp: Long): Long = element.timestamp
             }
-          ).asInstanceOf[org.apache.flink.api.common.eventtime.WatermarkStrategy[java.io.Serializable]], // <--- ADD THIS CAST
-        "Kafka Gameplay Events Source"
+          )
       )
-      .map { jsonString =>
-        try {
-          GSON.fromJson(jsonString.asInstanceOf[String], classOf[GameplayEvent])
-        } catch {
-          case e: Exception =>
-            println(s"Error parsing JSON: $jsonString - ${e.getMessage}")
-            // Return a dummy event or filter out invalid events if necessary
-            GameplayEvent("invalid_event", 0L, "unknown", new java.util.HashMap[String, AnyRef]())
-        }
-      }
-      .filter(_.event_type != "invalid_event") // Filter out any events that failed parsing
-      .assignAscendingTimestamps(_.timestamp) // For simple cases, can use this if events are mostly in order
 
-    // 4. Key the stream by player_id for stateful processing
-    val keyedEvents = gameplayEventStream.keyBy(_.player_id)
+    // 6. Key the stream by player_id for stateful processing
+    val keyedEvents = timedEventStream.keyBy(_.player_id)
 
-    // 5. Apply the PlayerProfileUpdater to update profile and generate adaptive parameters
+    // 7. Apply the PlayerProfileUpdater to update profile and generate adaptive parameters
     val adaptiveParamsStream: DataStream[AdaptiveParameters] = keyedEvents
       .map(new PlayerProfileAndAdaptiveParametersUpdater())
 
-    // 6. Configure Kafka Sink for adaptive_params
+    // 8. Configure Kafka Sink for adaptive_params
     val adaptiveParamsSink = KafkaSink.builder[String]()
       .setBootstrapServers(kafkaBootstrapServers)
       .setRecordSerializer(KafkaRecordSerializationSchema.builder()
@@ -159,13 +233,17 @@ object PlayerProfileAndAdaptiveParametersJob {
       )
       .build()
 
-    // 7. Write the adaptive parameters stream to Kafka
+    // 9. Write the adaptive parameters stream to Kafka
     adaptiveParamsStream
-      .map(params => GSON.toJson(params)) // Convert AdaptiveParameters case class to JSON string
+      .map(params => {
+          // use another RichMapFunction if performance is critical.
+          val gson = new GsonBuilder().registerTypeAdapterFactory(SetTypeAdapterFactory).create()
+          gson.toJson(params)
+      })
       .sinkTo(adaptiveParamsSink)
       .name("Kafka Adaptive Parameters Sink")
 
-    // 8. Execute the Flink job
+    // 10. Execute the Flink job
     env.execute("Adaptive Survivors Player Profile and Adaptive Parameters Job")
   }
 
@@ -316,12 +394,15 @@ object PlayerProfileAndAdaptiveParametersJob {
         eliteStatusImmunities += "freeze"
       }
 
+      // Ensure empty collections are handled correctly for consistent JSON serialization.
+      // An empty Scala Set/Map can sometimes serialize to "{}" instead of "[]",
+      // which causes issues with C#/.NET deserializers that expect an array.
       AdaptiveParameters(
         playerId = currentProfile.playerId,
-        enemyResistances = enemyResistances,
+        enemyResistances = if (enemyResistances.isEmpty) Map.empty else enemyResistances,
         eliteBehaviorShift = eliteBehaviorShift,
-        eliteStatusImmunities = eliteStatusImmunities,
-        breakableObjectBuffsDebuffs = breakableObjectBuffsDebuffs
+        eliteStatusImmunities = if (eliteStatusImmunities.isEmpty) Set.empty else eliteStatusImmunities,
+        breakableObjectBuffsDebuffs = if (breakableObjectBuffsDebuffs.isEmpty) Map.empty else breakableObjectBuffsDebuffs
       )
     }
   }
