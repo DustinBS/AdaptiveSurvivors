@@ -220,10 +220,12 @@ services:
       SPARK_WORKER_CORES: 1
       SPARK_WORKER_MEMORY: 1G
       HADOOP_CONF_DIR: /opt/bitnami/spark/conf
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/gcp/service-account-key.json
     env_file:
       - ./.env
     volumes:
       - ./logs/spark:/opt/bitnami/spark/logs
+      - ./gcp-credentials/service-account-key.json:/opt/gcp/service-account-key.json:ro
     depends_on:
       spark-master:
         condition: service_healthy

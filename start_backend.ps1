@@ -149,17 +149,8 @@ Push-Location .\Backend\SparkJobs\
 mvn clean package
 Pop-Location
 Write-Host "--- Submitting Spark Jobs and configs to Spark Master ---"
-docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT-jar-with-dependencies.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
+docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
 docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties spark-master:/opt/bitnami/spark/conf/log4j.properties
-# Command to connect Spark to BigQuery
-# docker exec spark-master /opt/bitnami/spark/bin/spark-submit `
-#   --class com.adaptivesurvivors.spark.HdfsToBigQueryStagingJob `
-#   --master spark://spark-master:7077 `
-#   --packages com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.26.0 `
-#   --files /opt/bitnami/spark/conf/log4j.properties `
-#   --conf "spark.jars.ivy=/tmp/.ivy" `
-#   /tmp/AdaptiveSurvivorsSparkJobs.jar
-#   --gcp-project-id=$env:GCP_PROJECT_ID --gcs-temp-bucket="$($env:GCP_PROJECT_ID)$($env:GCS_TEMP_BUCKET)"
 
 Write-Host "--- Backend Services Setup Complete ---"
 Write-Host "You can now run your Unity game and perform actions."

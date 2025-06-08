@@ -59,3 +59,15 @@ docker exec spark-master /opt/bitnami/spark/bin/spark-submit `
   --conf "spark.jars.ivy=/tmp/.ivy" `
   /tmp/AdaptiveSurvivorsSparkJobs.jar
 ```
+
+Spark -> Cloud Bucket -> BigQuery
+After generating some data, run the following command in PowerShell to initiate a batch staging job from HDFS -> BigQuery "gameplay_data_staging.gameplay_events_raw" table.
+```powershell
+docker exec spark-master /opt/bitnami/spark/bin/spark-submit `
+  --class com.adaptivesurvivors.spark.HdfsToBigQueryStagingJob `
+  --master spark://spark-master:7077 `
+  --conf "spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem" `
+  --conf "spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS" `
+  /tmp/AdaptiveSurvivorsSparkJobs.jar `
+  --gcp-project-id=your-gcp-project-id --gcs-temp-bucket=your-gcp-project-idyour-gcs-temp-bucket-suffix
+```

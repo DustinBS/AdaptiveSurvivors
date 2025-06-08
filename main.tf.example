@@ -50,14 +50,17 @@ variable "gcs_bucket_name_suffix" {
 # 1. Enable APIs
 resource "google_project_service" "iam" {
   service = "iam.googleapis.com"
+  disable_dependent_services = true
 }
 resource "google_project_service" "gcs" {
   service = "storage-component.googleapis.com"
   depends_on = [google_project_service.iam]
+  disable_dependent_services = true
 }
 resource "google_project_service" "bigquery" {
   service = "bigquery.googleapis.com"
   depends_on = [google_project_service.iam]
+  disable_dependent_services = true
 }
 
 # 2. Create the Service Account
@@ -98,6 +101,13 @@ resource "google_bigquery_dataset" "staging_dataset" {
 resource "google_storage_bucket_iam_member" "gcs_binding" {
   bucket = google_storage_bucket.spark_temp_bucket.name
   role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.sa.email}"
+}
+# This role grants permissions like 'storage.buckets.get' which are needed
+# by the GCS connector's cleanup process.
+resource "google_storage_bucket_iam_member" "gcs_legacy_reader_binding" {
+  bucket = google_storage_bucket.spark_temp_bucket.name
+  role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_service_account.sa.email}"
 }
 

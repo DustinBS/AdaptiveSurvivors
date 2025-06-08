@@ -42,7 +42,8 @@ docker-compose up -d
 docker-compose ps
 ```
 
-After you provision GCP services, get your service account key to gcp-credentials/ for Spark
+After you provision GCP services, set the .env variables and run `generate-gcp-key.ps1` on project root to get your service account key to gcp-credentials/service-account-key.json for Spark.
+Alternatively, run the commands yourself
 ```powershell
 # The format is [SERVICE_ACCOUNT_NAME]@[PROJECT_ID].iam.gserviceaccount.com
 # If you dont know your service account, you can find it with gcloud
@@ -51,6 +52,7 @@ gcloud iam service-accounts list
 gcloud iam service-accounts keys create "gcp-credentials/service-account-key.json" `
   --iam-account=[SERVICE_ACCOUNT_NAME]@[PROJECT_ID].iam.gserviceaccount.com
 ```
+note: recreating the service account (i.e. `terraform apply`after a `terraform destroy`) will invalidate the previous token. just run the `generate-gcp-key.ps1` script again.
 
 ### 3. Open Unity Project
 
