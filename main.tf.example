@@ -1,0 +1,116 @@
+# terraform/main.tf.example
+# You need to replace the 4 default values with your actual
+# GCP project ID, region, service account name, and GCS bucket suffix.
+# and turn into a main.tf file
+
+# Configure the Google Provider
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "google" {
+  project = var.gcp_project_id
+  region  = var.gcp_region
+}
+
+# --- Variables ---
+# These are the inputs to our configuration.
+variable "gcp_project_id" {
+  description = "The GCP Project ID."
+  type        = string
+  default     = "your-gcp-project-id" # Replace with your actual GCP project ID
+}
+
+variable "gcp_region" {
+  description = "The GCP region for resources."
+  type        = string
+  default     = "your-gcp-region" # Replace with your desired GCP region
+}
+
+variable "service_account_name" {
+  description = "The name of the service account."
+  type        = string
+  default     = "your-service-account-name" # Replace with your desired service account name
+}
+
+# name will be "gcp_project_idgcs_bucket_name_suffix"
+variable "gcs_bucket_name_suffix" {
+  description = "The suffix for the GCS bucket name."
+  type        = string
+  default     = "your-gcs-bucket-suffix" # Replace with your desired GCS bucket suffix (just a temp bucket for Spark)
+}
+
+# --- Resource Definitions ---
+
+# 1. Enable APIs
+resource "google_project_service" "iam" {
+  service = "iam.googleapis.com"
+}
+resource "google_project_service" "gcs" {
+  service = "storage-component.googleapis.com"
+  depends_on = [google_project_service.iam]
+}
+resource "google_project_service" "bigquery" {
+  service = "bigquery.googleapis.com"
+  depends_on = [google_project_service.iam]
+}
+
+# 2. Create the Service Account
+resource "google_service_account" "sa" {
+  account_id   = var.service_account_name
+  display_name = "Adaptive Survivors Service Account"
+  depends_on   = [google_project_service.iam]
+}
+
+# 3. Create the GCS Bucket for Spark
+resource "google_storage_bucket" "spark_temp_bucket" {
+  name          = "${var.gcp_project_id}${var.gcs_bucket_name_suffix}"
+  location      = var.gcp_region
+  force_destroy = true # Allows `terraform destroy` to work even if the bucket is not empty.
+  uniform_bucket_level_access = true
+  lifecycle_rule {
+    condition {
+      age = 1
+    }
+    action {
+      type = "Delete"
+    }
+  }
+  depends_on = [google_project_service.gcs]
+}
+
+# 4. Create the BigQuery Dataset
+resource "google_bigquery_dataset" "staging_dataset" {
+  dataset_id = "gameplay_data_staging"
+  location   = var.gcp_region
+  delete_contents_on_destroy = true
+  default_table_expiration_ms = 86400000 # 1 day
+  depends_on = [google_project_service.bigquery]
+}
+
+# 5. Grant IAM Roles to the Service Account
+# Role for managing objects in the GCS bucket
+resource "google_storage_bucket_iam_member" "gcs_binding" {
+  bucket = google_storage_bucket.spark_temp_bucket.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.sa.email}"
+}
+
+# Role for running BigQuery jobs
+resource "google_project_iam_member" "bq_job_user_binding" {
+  project = var.gcp_project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
+# Role for editing data in BigQuery datasets
+resource "google_project_iam_member" "bq_data_editor_binding" {
+  project = var.gcp_project_id
+  role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}

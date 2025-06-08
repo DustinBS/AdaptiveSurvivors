@@ -159,7 +159,7 @@ docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties spark-master:/
 #   --files /opt/bitnami/spark/conf/log4j.properties `
 #   --conf "spark.jars.ivy=/tmp/.ivy" `
 #   /tmp/AdaptiveSurvivorsSparkJobs.jar
-#   --gcp-project-id=$env:GCP_PROJECT_ID --gcs-temp-bucket=$env:GCS_TEMP_BUCKET
+#   --gcp-project-id=$env:GCP_PROJECT_ID --gcs-temp-bucket="$($env:GCP_PROJECT_ID)$($env:GCS_TEMP_BUCKET)"
 
 Write-Host "--- Backend Services Setup Complete ---"
 Write-Host "You can now run your Unity game and perform actions."

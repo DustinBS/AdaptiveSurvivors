@@ -196,10 +196,12 @@ services:
       SPARK_MASTER_WEBUI_PORT: 8080
       SPARK_MASTER_PORT: 7077
       HADOOP_CONF_DIR: /opt/bitnami/spark/conf
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/gcp/service-account-key.json
     env_file:
       - ./.env
     volumes:
       - ./logs/spark:/opt/bitnami/spark/logs
+      - ./gcp-credentials/service-account-key.json:/opt/gcp/service-account-key.json:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
       interval: 30s

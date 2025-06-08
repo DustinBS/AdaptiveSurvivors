@@ -42,6 +42,16 @@ docker-compose up -d
 docker-compose ps
 ```
 
+After you provision GCP services, get your service account key to gcp-credentials/ for Spark
+```powershell
+# The format is [SERVICE_ACCOUNT_NAME]@[PROJECT_ID].iam.gserviceaccount.com
+# If you dont know your service account, you can find it with gcloud
+gcloud iam service-accounts list
+# or gcloud iam service-accounts list --project PROJECT_ID
+gcloud iam service-accounts keys create "gcp-credentials/service-account-key.json" `
+  --iam-account=[SERVICE_ACCOUNT_NAME]@[PROJECT_ID].iam.gserviceaccount.com
+```
+
 ### 3. Open Unity Project
 
 You can direct Unity Hub to "Add" AdaptiveSurvivors/GameClient using Unity 6 LTS and it should work.
