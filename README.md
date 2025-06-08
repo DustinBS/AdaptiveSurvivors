@@ -4,12 +4,14 @@ A multiplayer survival game built with Unity and cloud backend.
 
 ## Prerequisites (for development)
 
-- **Git**
 - **Unity 6 LTS**
 - **Docker Desktop**
-- **Node.js v22.13.0 LTS**
-- **JDK 8 LTS** [Adoptium link](https://adoptium.net/temurin/releases/?version=8&os=any&arch=any)
-- **Maven 3.9.10** [Apache Maven link](https://maven.apache.org/download.cgi)
+- **JDK 8 LTS** - (for Flink, Scala) [Adoptium JDK 8 downloads page](https://adoptium.net/temurin/releases/?version=8&os=any&arch=any)
+- **Maven 3.9.10** - (for Flink, Scala) [Apache Maven downloads page](https://maven.apache.org/download.cgi)
+- **Node.js v22.13.0 LTS** (for Unity -> LLM generation of certain dialogue)
+- **Terraform (+ gcloud)** - (Optional for GCP, otherwise use [console.cloud.google.com](https://console.cloud.google.com))
+- **Powershell** (Optional for .ps1 setup scripts at root, you easily translate them to Bash)
+- **Git**
 
 ## Quick Start
 

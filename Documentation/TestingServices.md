@@ -1,4 +1,4 @@
-Integration tests
+# Integration tests
 Unity -> Kafka
 ``` powershell
 docker exec kafka /bin/kafka-console-consumer --bootstrap-server kafka:9092 --topic gameplay_events --from-beginning
@@ -44,4 +44,18 @@ gameplay_df.show()
 
 # To exit the pyspark shell, type exit()
 # exit()
+```
+
+# Other Unit Tests
+
+Spark -> Dry run
+After generating some data, run the following command in PowerShell to initiate a batch staging job from HDFS -> X (debug prints only).
+```powershell
+docker exec spark-master /opt/bitnami/spark/bin/spark-submit `
+  --class com.adaptivesurvivors.spark.HdfsToBigQueryStagingJob `
+  --master spark://spark-master:7077 `
+  --packages com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.26.0 `
+  --files /opt/bitnami/spark/conf/log4j.properties `
+  --conf "spark.jars.ivy=/tmp/.ivy" `
+  /tmp/AdaptiveSurvivorsSparkJobs.jar
 ```
