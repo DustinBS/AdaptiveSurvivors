@@ -13,6 +13,101 @@ A multiplayer survival game built with Unity and cloud backend.
 - **Powershell** (Optional for .ps1 setup scripts at root, you easily translate them to Bash)
 - **Git**
 
+## Planned Architecture
+```mermaid
+graph TD
+    %% -- Legend --
+    subgraph Legend
+        direction LR
+        L1["Player/Client"]:::playerStyle --- L2["Real-Time System"]:::realtimeSystemStyle
+        L2 --- L3["Batch/Analytics"]:::batchSystemStyle
+        L3 --- L4["Kafka Topic"]:::kafkaTopicStyle
+        L4 --- L5["External API"]:::apiStyle
+    end
+    %% Force vertical space
+    Legend --- UnityClient
+    %% Make legend links invisible (indices 0-4)
+    linkStyle 0,1,2,3,4 stroke-width:0px
+
+    %% -- Component Definitions --
+    UnityClient["Unity Client"]
+    subgraph " "
+        direction LR
+        subgraph "Real-Time Adaptation Loop"
+            direction TB
+            gameplay_events["topic: gameplay_events"]
+            Flink["Flink (Adaptive Logic)"]
+            adaptive_params["topic: adaptive_params"]
+        end
+
+        subgraph "Seer Prediction Pipeline"
+            direction TB
+            seer_encounter["topic: seer_encounter_trigger"]
+            Spark["Spark (ML Prep)"]
+            bqml_features["topic: bqml_features"]
+            DataLake["HDFS Data Lake"]
+
+            %% Invisible anchor node to direct arrows to the top of BigQuery
+            bq_anchor[" "]
+            style bq_anchor fill:none,stroke:none,width:0px,height:0px
+
+            BigQuery["BigQuery ML"]
+            CloudFunctionSeer["Cloud Function (Seer)"]
+            seer_results["topic: seer_results"]
+        end
+
+        subgraph "Post-Run Commentary (HTTP)"
+            direction TB
+            CloudFunctionCommentary["Cloud Function (Commentary)"]
+            GeminiAPI["Gemini API"]
+        end
+    end
+
+    %% -- Data Flows --
+
+    %% Real-Time Loop
+    UnityClient -- "Telemetry" --> gameplay_events
+    gameplay_events --> Flink
+    Flink -- "Elite Params" --> adaptive_params
+    adaptive_params --> UnityClient
+
+    %% Prediction Loop & Analytics Ingestion
+    UnityClient -- "Seer Trigger" --> seer_encounter
+    seer_encounter --> Spark
+    Spark -- "Reads History" --> DataLake
+    Spark -- "Produces Features" --> bqml_features
+    bqml_features -- "Sink to HDFS" --> DataLake
+
+    %% Flows into BigQuery via anchor
+    Spark -- "Writes Training Data" --> bq_anchor
+    DataLake -.->|Initial Batch Load| bq_anchor
+    bq_anchor --> BigQuery
+
+    Spark -- "HTTP Trigger" --> CloudFunctionSeer
+    CloudFunctionSeer -- "Runs Prediction" --> BigQuery
+    CloudFunctionSeer -- "Generates Dialogue" --> GeminiAPI
+    CloudFunctionSeer -- "Publishes Result" --> seer_results
+    seer_results --> UnityClient
+
+    %% Post-Run Commentary Flow
+    UnityClient -- "POST Run Summary" --> CloudFunctionCommentary
+    CloudFunctionCommentary -- "Generates Text" --> GeminiAPI
+    CloudFunctionCommentary -- "HTTP Response" --> UnityClient
+
+    %% -- Styling --
+    classDef playerStyle fill:#E0F7FA,stroke:#00796B,stroke-width:2px
+    classDef realtimeSystemStyle fill:#D4EDDA,stroke:#28A745,stroke-width:2px
+    classDef batchSystemStyle fill:#FFF3CD,stroke:#FFC107,stroke-width:2px
+    classDef apiStyle fill:#E8EAF6,stroke:#3F51B5,stroke-width:2px
+    classDef kafkaTopicStyle fill:#fcecec,stroke:#dd2c00,stroke-width:2px
+
+    class UnityClient playerStyle;
+    class Flink,CloudFunctionSeer realtimeSystemStyle;
+    class Spark,DataLake,BigQuery,CloudFunctionCommentary batchSystemStyle;
+    class GeminiAPI apiStyle;
+    class gameplay_events,adaptive_params,seer_encounter,seer_results,bqml_features kafkaTopicStyle;
+```
+
 ## Quick Start
 
 ### 1. Clone and Setup
@@ -104,71 +199,4 @@ AdaptiveSurvivors/
 ├── CloudFunctions/    # GCP Serverless functions
 ├── GameClient/        # Unity project (submodule)
 └── docker-compose.yml, .env.example, other files
-```
-
-## Planned Architecture
-```mermaid
-graph TD
-    %% Define Node Styles
-    classDef process fill:#e1f5fe,stroke:#4fc3f7,stroke-width:2px;
-    classDef datastore fill:#e8f5e9,stroke:#66bb6a,stroke-width:2px,shape:cylinder;
-    classDef cloud fill:#fff3e0,stroke:#ffb74d,stroke-width:2px;
-    classDef gcp_datastore fill:#fbe9e7,stroke:#ff8a65,stroke-width:2px,shape:cylinder;
-
-    %% Main Actor
-    UnityClient["Unity Game Client (C#)"]
-
-    subgraph Local Development Environment
-        direction LR
-
-        subgraph Real-time Processing
-            direction TB
-            Kafka[("Apache Kafka Bus")]:::datastore
-            Flink["Apache Flink Consumer"]:::process
-        end
-
-        subgraph Batch Ingestion & Processing
-            direction TB
-            Connect["Kafka Connect"]:::process
-            HDFS[("HDFS Data Lake")]:::datastore
-            Spark["Apache Spark Job"]:::process
-        end
-    end
-
-    subgraph "Google Cloud Platform (GCP)"
-        direction TB
-        CloudFunc["Cloud Function (LLM NPC)"]:::cloud
-        GeminiAPI["Gemini 1.5 Flash API"]:::cloud
-
-        subgraph BigQuery Warehouse
-            BQ_Raw[("BQ Staging: gameplay_events_raw")]:::gcp_datastore
-            BQ_Hist[("BQ History: gameplay_events_history")]:::gcp_datastore
-            BQ_LLM[("BQ Prompts: llm_npc_prompts")]:::gcp_datastore
-        end
-    end
-
-    %% --- Define The Connections ---
-
-    %% Real-time Gameplay & Adaptation Loop
-    UnityClient -->|"Gameplay Events (JSON)"| Kafka;
-    Kafka -->|"Topic: gameplay_events"| Flink;
-    Flink -->|"Topic: adaptive_params"| Kafka;
-    Kafka -->|"Real-time Adaptive Params"| UnityClient;
-
-    %% Raw Data Lake Ingestion (Batch)
-    Kafka -->|"Topics: gameplay_events & adaptive_params"| Connect;
-    Connect -->|"Batched Writes"| HDFS;
-
-    %% Background Data Processing to Cloud
-    HDFS -->|"Round-End Batch Read"| Spark;
-    Spark -->|"Loads Transformed Data"| BQ_Raw;
-    BQ_Raw -->|"SQL ETL"| BQ_Hist;
-    BQ_Hist -->|"SQL Aggregation"| BQ_LLM;
-
-    %% On-Demand LLM NPC Commentary
-    UnityClient -.->|"On-Dialogue HTTP Request"| CloudFunc;
-    CloudFunc -->|"Reads Run Summary"| BQ_LLM;
-    CloudFunc -->|"Calls LLM"| GeminiAPI;
-    GeminiAPI -->|"Returns Dialogue"| CloudFunc;
-    CloudFunc -.->|"Returns Dialogue (JSON)"| UnityClient;
 ```
