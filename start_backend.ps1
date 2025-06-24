@@ -124,9 +124,32 @@ Write-Host "--- (re)Building Flink Job JAR ---"
 Push-Location .\Backend\FlinkJobs\
 mvn clean package
 Pop-Location
-Write-Host "--- Submitting Flink Job to JobManager ---"
+
+Write-Host "--- Cancelling and Resubmitting Flink Job ---"
+
+$flinkJobName = "Adaptive Survivors Player Profile and Adaptive Parameters Job"
+try {
+    # Attempt to find and cancel the running job
+    $jobList = docker exec jobmanager flink list -r -s
+    $jobId = ($jobList | Select-String -Pattern ([regex]::Escape($flinkJobName)) | ForEach-Object {
+        if ($_ -match '([0-9a-fA-F]{32})') { $Matches[1] }
+    })
+
+    if ($jobId) {
+        Write-Host "Found and cancelling Flink job '$flinkJobName' (ID: $jobId)..."
+        docker exec jobmanager flink cancel $jobId
+        Start-Sleep -Seconds 10
+    } else {
+        Write-Host "No running job '$flinkJobName' found."
+    }
+} catch {
+    Write-Warning "Failed to check or cancel Flink job: $($_.Exception.Message)"
+}
+
+# Copy and submit the new JAR
 docker cp .\Backend\FlinkJobs\target\AdaptiveSurvivorsFlinkJobs-1.0-SNAPSHOT.jar jobmanager:/tmp/AdaptiveSurvivorsFlinkJobs.jar
 docker exec jobmanager flink run -d /tmp/AdaptiveSurvivorsFlinkJobs.jar
+Write-Host "Flink Job submitted."
 
 Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
 try {
