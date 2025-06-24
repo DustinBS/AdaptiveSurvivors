@@ -25,6 +25,7 @@ import com.google.gson._
 import com.google.gson.reflect.TypeToken
 import com.google.gson.stream.{JsonReader, JsonWriter}
 import java.lang.reflect.ParameterizedType
+import scala.math.sqrt
 
 object SetTypeAdapterFactory extends TypeAdapterFactory {
   override def create[T](gson: Gson, tt: TypeToken[T]): TypeAdapter[T] = {
@@ -57,14 +58,17 @@ case class GameplayEvent(event_type: String, timestamp: Long, player_id: String,
 
 case class PlayerProfile(
   var playerId: String,
-  var totalDamageDealt: Double = 0.0,
-  var totalDamageTaken: Double = 0.0,
-  var weaponsUsed: Map[String, Int] = Map.empty,
-  var commonDodgeVector: String = "none",
-  var playstyleTags: Set[String] = Set.empty,
+  // Vexer State
   var dashDirectionCounts: Map[String, Int] = Map.empty,
   var lastVexerPrediction: String = "none",
-  var lastUpdated: Long = System.currentTimeMillis()
+  // Brute State
+  var lastPlayerVelocity: PredictionVector = PredictionVector(0, 0),
+  var recentKillDotProducts: List[Double] = List.empty,
+  var lastUpdated: Long = System.currentTimeMillis(),
+  // --- State for Staleness Mechanic ---
+  var currentBruteForm: String = "skirmisher", // Default form
+  var activeStaleTimer: Long = 0L, // Timestamp of the currently set timer
+  var stalenessOverrideUntil: Long = 0L // Timestamp for the grace period
 )
 
 // --- Envelope and Payload Models ---
@@ -90,6 +94,10 @@ class JsonToGameplayEventMapper extends RichMapFunction[String, GameplayEvent] {
 }
 
 object PlayerProfileAndAdaptiveParametersJob {
+  val maxDotProductHistory = 20
+  val stalenessCheckDurationMs = 5000 // 5 seconds
+  val stalenessGracePeriodMs = 5000 // 5 seconds
+
   def main(args: Array[String]): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val kafkaBootstrapServers = sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -134,56 +142,126 @@ object PlayerProfileAndAdaptiveParametersJob {
 
     override def processElement(event: GameplayEvent, ctx: KeyedProcessFunction[String, GameplayEvent, String]#Context, out: Collector[String]): Unit = {
       val currentProfile = Option(playerProfileState.value()).getOrElse(PlayerProfile(event.player_id))
+      val currentTime = ctx.timerService().currentProcessingTime()
 
+      // --- Event Processing Logic ---
       event.event_type match {
+        case "player_movement_event" =>
+          val dirPayload = event.payload.get("dir").asInstanceOf[java.util.Map[String, Double]]
+          currentProfile.lastPlayerVelocity = PredictionVector(dirPayload.get("dx").toFloat, dirPayload.get("dy").toFloat)
+
+        case "enemy_death_event" =>
+          // --- Grace Period Check ---
+          // If we are inside a staleness override grace period, do NOT run the normal logic.
+          if (currentTime < currentProfile.stalenessOverrideUntil) {
+            // Do nothing, let the stale form persist for the grace period
+          } else {
+            // It's safe to run the normal dot product logic
+            val enemyVelPayload = event.payload.get("velocity").asInstanceOf[java.util.Map[String, Double]]
+            val enemyVel = (enemyVelPayload.get("vx"), enemyVelPayload.get("vy"))
+            val playerVel = (currentProfile.lastPlayerVelocity.dx, currentProfile.lastPlayerVelocity.dy)
+            val enemyMag = sqrt(enemyVel._1 * enemyVel._1 + enemyVel._2 * enemyVel._2)
+            val playerMag = sqrt(playerVel._1 * playerVel._1 + playerVel._2 * playerVel._2)
+
+            if (enemyMag > 0 && playerMag > 0) {
+              val normEnemyVel = (enemyVel._1 / enemyMag, enemyVel._2 / enemyMag)
+              val normPlayerVel = (playerVel._1 / playerMag, playerVel._2 / playerMag)
+              val dotProduct = (normPlayerVel._1 * normEnemyVel._1) + (normPlayerVel._2 * normEnemyVel._2)
+              currentProfile.recentKillDotProducts = (dotProduct :: currentProfile.recentKillDotProducts).take(maxDotProductHistory)
+            }
+
+            // --- Tuned Adaptation Logic ---
+            var newAdaptationType = currentProfile.currentBruteForm
+            if (currentProfile.recentKillDotProducts.size >= 5) {
+              val avgDotProduct = currentProfile.recentKillDotProducts.sum / currentProfile.recentKillDotProducts.size
+
+              if (avgDotProduct < -0.2) { // Wider window for Juggernaut
+                newAdaptationType = "juggernaut"
+              } else if (avgDotProduct > 0.6) { // Narrower window for Skirmisher
+                newAdaptationType = "skirmisher"
+              } else {
+                // Default to the opposite form to encourage variety
+                newAdaptationType = if(currentProfile.currentBruteForm == "juggernaut") "skirmisher" else "juggernaut"
+              }
+            }
+
+            // If the form changed, send a message and reset the staleness timer
+            if (newAdaptationType != currentProfile.currentBruteForm) {
+              sendBruteFormUpdate(newAdaptationType, currentProfile, ctx, out)
+            }
+          }
+
         case "player_dash_event" =>
+          // This logic for the Vexer remains separate and unchanged.
           val dirPayload = event.payload.get("direction").asInstanceOf[java.util.Map[String, Double]]
           val dx = dirPayload.get("dx")
           val dy = dirPayload.get("dy")
-          val direction = if (Math.abs(dx) > Math.abs(dy)) {
-            if (dx > 0) "right" else "left"
-          } else {
-            if (dy > 0) "up" else "down"
-          }
+          val direction = if (Math.abs(dx) > Math.abs(dy)) (if (dx > 0) "right" else "left") else (if (dy > 0) "up" else "down")
           val newCount = currentProfile.dashDirectionCounts.getOrElse(direction, 0) + 1
           currentProfile.dashDirectionCounts = currentProfile.dashDirectionCounts.updated(direction, newCount)
 
-        case "damage_taken_event" =>
-            val dmgAmount = event.payload.get("dmg_amount").asInstanceOf[Double]
-            currentProfile.totalDamageDealt += dmgAmount
-            if(currentProfile.totalDamageDealt > 1000) currentProfile.playstyleTags += "Aggressive"
+          if (currentProfile.dashDirectionCounts.nonEmpty) {
+            val newPrediction = currentProfile.dashDirectionCounts.maxBy(_._2)._1
+            if (newPrediction != currentProfile.lastVexerPrediction) {
+              currentProfile.lastVexerPrediction = newPrediction
+              val directionVector = newPrediction match {
+                case "up" => PredictionVector(0, 1); case "down" => PredictionVector(0, -1)
+                case "left" => PredictionVector(-1, 0); case "right" => PredictionVector(1, 0)
+              }
+              val vexerPayload = VexerPredictionPayload(currentProfile.playerId, directionVector)
+              val vexerEnvelope = AdaptiveMessageEnvelope("vexer_prediction_update", gson.toJson(vexerPayload))
+              out.collect(gson.toJson(vexerEnvelope))
+            }
+          }
 
-        // Handle other events similarly...
-        case _ =>
+        case _ => // Ignore other events for this particular job logic
       }
 
       currentProfile.lastUpdated = System.currentTimeMillis()
       playerProfileState.update(currentProfile)
+    }
+    /**
+     * This method is called by Flink when a registered timer fires.
+     */
+    override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[String, GameplayEvent, String]#OnTimerContext, out: Collector[String]): Unit = {
+      val currentProfile = playerProfileState.value()
 
-      // 1. Generate message for the Adaptive Brute
-      val bruteAdaptationType = if (currentProfile.playstyleTags.contains("Aggressive")) "juggernaut" else "skirmisher"
-      val brutePayload = FormAdaptationPayload(currentProfile.playerId, bruteAdaptationType)
-      val brutePayloadJson = gson.toJson(brutePayload)
-      val bruteEnvelope = AdaptiveMessageEnvelope("form_adaptation", brutePayloadJson)
-      out.collect(gson.toJson(bruteEnvelope))
+      // Only act if the timer that fired is the one we have stored (prevents acting on old, orphaned timers)
+      if (currentProfile != null && timestamp == currentProfile.activeStaleTimer) {
+        // Force a switch to the opposite form
+        val newForm = if (currentProfile.currentBruteForm == "juggernaut") "skirmisher" else "juggernaut"
 
-      // 2. Generate message for the Vector Vexer (if prediction changes)
-      if (currentProfile.dashDirectionCounts.nonEmpty) {
-        val newPrediction = currentProfile.dashDirectionCounts.maxBy(_._2)._1
-        if (newPrediction != currentProfile.lastVexerPrediction) {
-          currentProfile.lastVexerPrediction = newPrediction
-          playerProfileState.update(currentProfile)
+        // --- Set the Grace Period ---
+        currentProfile.stalenessOverrideUntil = ctx.timerService().currentProcessingTime() + stalenessGracePeriodMs
 
-          val directionVector = newPrediction match {
-            case "up" => PredictionVector(0, 1); case "down" => PredictionVector(0, -1)
-            case "left" => PredictionVector(-1, 0); case "right" => PredictionVector(1, 0)
-          }
-          val vexerPayload = VexerPredictionPayload(currentProfile.playerId, directionVector)
-          val vexerPayloadJson = gson.toJson(vexerPayload)
-          val vexerEnvelope = AdaptiveMessageEnvelope("vexer_prediction_update", vexerPayloadJson)
-          out.collect(gson.toJson(vexerEnvelope))
-        }
+        // Send the update and update the state
+        sendBruteFormUpdate(newForm, currentProfile, ctx, out)
       }
+    }
+
+    /**
+     * Helper function to send Brute form updates and manage timers.
+     */
+    private def sendBruteFormUpdate(newForm: String, profile: PlayerProfile, ctx: KeyedProcessFunction[String, GameplayEvent, String]#Context, out: Collector[String]): Unit = {
+        // Delete any previously existing timer
+        if (profile.activeStaleTimer != 0L) {
+          ctx.timerService().deleteProcessingTimeTimer(profile.activeStaleTimer)
+        }
+
+        // Update state
+        profile.currentBruteForm = newForm
+
+        // Send the message
+        val payload = FormAdaptationPayload(profile.playerId, newForm)
+        val envelope = AdaptiveMessageEnvelope("form_adaptation", gson.toJson(payload))
+        out.collect(gson.toJson(envelope))
+
+        // Register a new timer for the new form
+        val newTimerTimestamp = ctx.timerService().currentProcessingTime() + stalenessCheckDurationMs
+        ctx.timerService().registerProcessingTimeTimer(newTimerTimestamp)
+        profile.activeStaleTimer = newTimerTimestamp
+
+        playerProfileState.update(profile)
     }
   }
 }
