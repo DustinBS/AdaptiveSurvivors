@@ -2,7 +2,7 @@
 
 // This Flink job processes real-time gameplay events from Kafka,
 // maintains a player profile, derives adaptive parameters,
-// and publishes them back to Kafka.
+// and conditionally produce different, enveloped adaptive messages back to Kafka.
 
 package com.adaptivesurvivors.flink
 
@@ -17,6 +17,8 @@ import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsIni
 import org.apache.flink.connector.kafka.sink.{KafkaSink, KafkaRecordSerializationSchema}
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.util.Collector
 
 import java.time.Duration
 import java.util.Properties
@@ -103,8 +105,10 @@ case class PlayerProfile(
   var totalDamageDealt: Double = 0.0,
   var totalDamageTaken: Double = 0.0,
   var weaponsUsed: Map[String, Int] = Map.empty,
-  var commonDodgeVector: String = "none", // Example: "left", "right", "forward", "backward"
-  var playstyleTags: Set[String] = Set.empty, // Example: "Aggressive", "Defensive", "Kiting"
+  var commonDodgeVector: String = "none",
+  var playstyleTags: Set[String] = Set.empty,
+  var dashDirectionCounts: Map[String, Int] = Map.empty, // "up" -> 5, "down" -> 2, etc.
+  var lastVexerPrediction: String = "none", // Stores the last direction we sent
   var lastUpdated: Long = System.currentTimeMillis()
 )
 
@@ -127,6 +131,33 @@ case class AdaptiveParameters(
   breakableObjectBuffsDebuffs: Map[String, String] = Map.empty,
   timestamp: Long = System.currentTimeMillis()
 )
+
+// --- NEW: Case classes for the Message Envelope structure ---
+// These mirror the structures we defined in KafkaClient.cs
+
+/**
+ * The top-level envelope for all messages sent to the adaptive_params topic.
+ */
+case class AdaptiveMessageEnvelope(message_type: String, payload: String)
+
+/**
+ * Payload for the Adaptive Brute's form change.
+ * It's based on the original AdaptiveParameters class.
+ */
+case class FormAdaptationPayload(
+  playerId: String,
+  adaptation_type: String // Simplified for the Brute's current needs
+)
+
+/**
+ * Payload for the Vector Vexer's prediction update.
+ */
+case class VexerPredictionPayload(
+  playerId: String,
+  predicted_direction: PredictionVector
+)
+
+case class PredictionVector(dx: Float, dy: Float)
 
 /**
  * A RichMapFunction to parse JSON strings into GameplayEvent objects.
@@ -220,8 +251,8 @@ object PlayerProfileAndAdaptiveParametersJob {
     val keyedEvents = timedEventStream.keyBy(_.player_id)
 
     // 7. Apply the PlayerProfileUpdater to update profile and generate adaptive parameters
-    val adaptiveParamsStream: DataStream[AdaptiveParameters] = keyedEvents
-      .map(new PlayerProfileAndAdaptiveParametersUpdater())
+    val envelopedJsonStream: DataStream[String] = keyedEvents
+      .process(new PlayerProfileUpdater())
 
     // 8. Configure Kafka Sink for adaptive_params
     val adaptiveParamsSink = KafkaSink.builder[String]()
@@ -234,46 +265,58 @@ object PlayerProfileAndAdaptiveParametersJob {
       .build()
 
     // 9. Write the adaptive parameters stream to Kafka
-    adaptiveParamsStream
-      .map(params => {
-          // use another RichMapFunction if performance is critical.
-          val gson = new GsonBuilder().registerTypeAdapterFactory(SetTypeAdapterFactory).create()
-          gson.toJson(params)
-      })
-      .sinkTo(adaptiveParamsSink)
-      .name("Kafka Adaptive Parameters Sink")
+    envelopedJsonStream.sinkTo(adaptiveParamsSink).name("Kafka Adaptive Parameters Sink")
 
-    // 10. Execute the Flink job
     env.execute("Adaptive Survivors Player Profile and Adaptive Parameters Job")
   }
 
   /**
-   * Flink RichMapFunction to maintain player profile state and generate adaptive parameters.
+   * Flink KeyedProcessFunction to handle state and conditionally
+   * emit different types of enveloped messages to maintain player profile state and generate adaptive parameters.
    * This function will be called for each event, keyed by player_id.
    */
-  class PlayerProfileAndAdaptiveParametersUpdater extends RichMapFunction[GameplayEvent, AdaptiveParameters] {
+  class PlayerProfileUpdater extends KeyedProcessFunction[String, GameplayEvent, String] {
 
     // ValueState to hold the PlayerProfile for each player_id
     private var playerProfileState: ValueState[PlayerProfile] = _
 
+    // --- NEW: Transient Gson instance for serializing output messages ---
+    @transient private var gson: Gson = _
+
     override def open(parameters: Configuration): Unit = {
-      // Initialize the ValueStateDescriptor for PlayerProfile
-      val descriptor = new ValueStateDescriptor(
-        "player-profile", // The state name
-        createTypeInformation[PlayerProfile] // Type information for the state
-      )
+      val descriptor = new ValueStateDescriptor("player-profile", createTypeInformation[PlayerProfile])
       playerProfileState = getRuntimeContext.getState(descriptor)
+
+      // Initialize Gson here to avoid serialization issues
+      gson = new GsonBuilder().registerTypeAdapterFactory(SetTypeAdapterFactory).create()
     }
 
-    override def map(event: GameplayEvent): AdaptiveParameters = {
+    override def processElement(
+      event: GameplayEvent,
+      ctx: KeyedProcessFunction[String, GameplayEvent, String]#Context,
+      out: Collector[String] // The collector for sending output records
+    ): Unit = {
       // Get current player profile or create a new one if it doesn't exist
-      val currentProfile = Option(playerProfileState.value()) match {
-        case Some(profile) => profile
-        case None          => PlayerProfile(event.player_id)
-      }
+      val currentProfile = Option(playerProfileState.value()).getOrElse(PlayerProfile(event.player_id))
 
       // --- Update Player Profile based on the event ---
       event.event_type match {
+        case "player_dash_event" =>
+          val dirPayload = event.payload.get("direction").asInstanceOf[java.util.Map[String, Double]]
+          val dx = dirPayload.get("dx")
+          val dy = dirPayload.get("dy")
+
+          // Convert vector to cardinal direction string
+          val direction = if (Math.abs(dx) > Math.abs(dy)) {
+            if (dx > 0) "right" else "left"
+          } else {
+            if (dy > 0) "up" else "down"
+          }
+
+          // Update the counts in the profile
+          val newCount = currentProfile.dashDirectionCounts.getOrElse(direction, 0) + 1
+          currentProfile.dashDirectionCounts = currentProfile.dashDirectionCounts.updated(direction, newCount)
+
         case "player_movement_event" =>
           // Safely extract the nested 'dir' map
           val dirPayload = event.payload.get("dir") match {
@@ -365,45 +408,41 @@ object PlayerProfileAndAdaptiveParametersJob {
       currentProfile.lastUpdated = System.currentTimeMillis()
       playerProfileState.update(currentProfile)
 
-      // --- Generate Adaptive Parameters based on the updated Player Profile ---
-      var enemyResistances: Map[String, Double] = Map.empty
-      var eliteBehaviorShift: String = "none"
-      var eliteStatusImmunities: Set[String] = Set.empty
-      var breakableObjectBuffsDebuffs: Map[String, String] = Map.empty
+      // --- Generate and Emit Adaptive Messages Conditionally ---
+      // 1. Generate the message for the Adaptive Brute (this happens on every event)
+      //    This logic can be refined later to be less frequent if needed.
+      val bruteAdaptationType = if (currentProfile.playstyleTags.contains("Aggressive")) "juggernaut" else "skirmisher"
+      val brutePayload = FormAdaptationPayload(currentProfile.playerId, bruteAdaptationType)
+      val brutePayloadJson = gson.toJson(brutePayload)
+      val bruteEnvelope = AdaptiveMessageEnvelope("form_adaptation", brutePayloadJson)
+      out.collect(gson.toJson(bruteEnvelope))
 
-      if (currentProfile.weaponsUsed.nonEmpty) {
-        val topWeapons = currentProfile.weaponsUsed.toSeq.sortBy(-_._2).take(3).map(_._1)
-        topWeapons.foreach(weaponId => {
-          enemyResistances = enemyResistances.updated(weaponId, 0.25)
-        })
+
+      // 2. Generate the message for the Vector Vexer (ONLY if the prediction changes)
+      if (currentProfile.dashDirectionCounts.nonEmpty) {
+        // Find the most frequent dash direction
+        val newPrediction = currentProfile.dashDirectionCounts.maxBy(_._2)._1
+
+        // If the prediction has changed, send an update
+        if (newPrediction != currentProfile.lastVexerPrediction) {
+          currentProfile.lastVexerPrediction = newPrediction // Update state with the new prediction
+          playerProfileState.update(currentProfile) // IMPORTANT: Save the updated state
+
+          val directionVector = newPrediction match {
+            case "up"    => PredictionVector(0, 1)
+            case "down"  => PredictionVector(0, -1)
+            case "left"  => PredictionVector(-1, 0)
+            case "right" => PredictionVector(1, 0)
+          }
+
+          val vexerPayload = VexerPredictionPayload(currentProfile.playerId, directionVector)
+          val vexerPayloadJson = gson.toJson(vexerPayload)
+          val vexerEnvelope = AdaptiveMessageEnvelope("vexer_prediction_update", vexerPayloadJson)
+
+          // Collect and send the Vexer message
+          out.collect(gson.toJson(vexerEnvelope))
+        }
       }
-
-      currentProfile.commonDodgeVector match {
-        case "left" | "right" | "forward" | "backward" =>
-          eliteBehaviorShift = "anticipate_" + currentProfile.commonDodgeVector
-        case _ =>
-      }
-
-      if (currentProfile.playstyleTags.contains("Aggressive")) {
-        eliteBehaviorShift = "speed_aggression_boost"
-      } else if (currentProfile.playstyleTags.contains("Kiting")) {
-        eliteBehaviorShift = "temporary_slow_on_hit"
-      }
-
-      if (currentProfile.playstyleTags.contains("Aggressive") && currentProfile.totalDamageDealt > 2000) {
-        eliteStatusImmunities += "freeze"
-      }
-
-      // Ensure empty collections are handled correctly for consistent JSON serialization.
-      // An empty Scala Set/Map can sometimes serialize to "{}" instead of "[]",
-      // which causes issues with C#/.NET deserializers that expect an array.
-      AdaptiveParameters(
-        playerId = currentProfile.playerId,
-        enemyResistances = if (enemyResistances.isEmpty) Map.empty else enemyResistances,
-        eliteBehaviorShift = eliteBehaviorShift,
-        eliteStatusImmunities = if (eliteStatusImmunities.isEmpty) Set.empty else eliteStatusImmunities,
-        breakableObjectBuffsDebuffs = if (breakableObjectBuffsDebuffs.isEmpty) Map.empty else breakableObjectBuffsDebuffs
-      )
     }
   }
 }
