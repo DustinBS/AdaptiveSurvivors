@@ -15,7 +15,7 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Configuration for the generative model
-# Using flash for speed and cost-effectiveness, as specified in the GDD. 
+# Using flash for speed and cost-effectiveness, as specified in the GDD.
 generation_config = {
     "temperature": 0.8,
     "top_p": 1.0,
@@ -31,7 +31,7 @@ model = genai.GenerativeModel(
 def post_run_commentary_function(request):
     """
     HTTP Cloud Function to generate NPC commentary based on player run data.
-    Triggered by a POST request from the Unity client. 
+    Triggered by a POST request from the Unity client.
     """
     # Set CORS headers for the preflight request and the main request
     # This is crucial for allowing requests from your Unity game client.
@@ -58,17 +58,17 @@ def post_run_commentary_function(request):
         # Extract data from the new payload structure
         personality = request_json.get("npc_personality", "a generic video game character")
         stat_data = request_json.get("statistic_to_comment_on")
-        
+
         if not stat_data or "Key" not in stat_data or "Value" not in stat_data:
              return ("'statistic_to_comment_on' field is missing or malformed.", 400, headers)
-        
+
         stat_key = stat_data["Key"]
         stat_value = stat_data["Value"]
 
     except Exception as e:
         return (f"Error parsing request JSON: {e}", 400, headers)
 
-    # Construct a more focused prompt for the Gemini API based on the single statistic 
+    # Construct a more focused prompt for the Gemini API based on the single statistic
     prompt_parts = [
         f"You are a video game NPC with this personality: '{personality}'.",
         "Based on the following single fact about a player, provide a short, flavorful, in-character comment (2-3 sentences max).",
