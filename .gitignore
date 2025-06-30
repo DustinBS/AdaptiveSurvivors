@@ -23,12 +23,15 @@ Backend/SparkJobs/dependency-reduced-pom.xml
 *.iml
 .vscode/
 
-# Terraform-generated files
-.terraform
-*.tfstate
-*.tfstate.backup
-crash.log
-main.tf
+# Terraform state and secrets
+Terraform/.terraform/
+Terraform/*.tfstate
+Terraform/*.tfstate.*
+Terraform/terraform.tfvars
+Terraform/*.tfvars
+Terraform/*.zip
+Terraform/crash.log
+Terraform/variables.tf
 
 # GCP service account credentials
 gcp-credentials/
