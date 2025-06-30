@@ -36,6 +36,10 @@ resource "google_storage_bucket_iam_member" "gcs_binding" {
   bucket = google_storage_bucket.spark_temp_bucket.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.sa.email}"
+  depends_on = [
+    google_storage_bucket.spark_temp_bucket,
+    google_project_service.gcs
+  ]
 }
 
 # 3b. Legacy role needed by some GCS connectors.
@@ -43,6 +47,10 @@ resource "google_storage_bucket_iam_member" "gcs_legacy_reader_binding" {
   bucket = google_storage_bucket.spark_temp_bucket.name
   role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_service_account.sa.email}"
+  depends_on = [
+    google_storage_bucket.spark_temp_bucket,
+    google_project_service.gcs
+  ]
 }
 
 # 3c. Roles for running BigQuery jobs and editing data.
@@ -50,10 +58,20 @@ resource "google_project_iam_member" "bq_job_user_binding" {
   project = var.gcp_project_id
   role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.sa.email}"
+  depends_on = [
+    google_project_service.bigquery,
+    google_service_account.sa,
+    google_project_service.iam
+  ]
 }
 
 resource "google_project_iam_member" "bq_data_editor_binding" {
   project = var.gcp_project_id
   role    = "roles/bigquery.dataEditor"
   member  = "serviceAccount:${google_service_account.sa.email}"
+  depends_on = [
+    google_project_service.bigquery,
+    google_service_account.sa,
+    google_project_service.iam
+  ]
 }

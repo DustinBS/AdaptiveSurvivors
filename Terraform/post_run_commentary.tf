@@ -4,12 +4,15 @@
 # 1. Enable APIs.
 resource "google_project_service" "cloudfunctions_api" {
   service = "cloudfunctions.googleapis.com"
+  disable_on_destroy = false
 }
 resource "google_project_service" "cloudbuild_api" {
   service = "cloudbuild.googleapis.com"
+  disable_on_destroy = false
 }
 resource "google_project_service" "run_api" {
   service = "run.googleapis.com"
+  disable_on_destroy = false
 }
 
 # 2. Create a GCS bucket to store the function's source code.
@@ -61,7 +64,8 @@ resource "google_cloudfunctions2_function" "post_run_commentary" {
 
   depends_on = [
     google_project_service.cloudfunctions_api,
-    google_project_service.cloudbuild_api
+    google_project_service.cloudbuild_api,
+    google_project_service.iam
   ]
 }
 
@@ -72,4 +76,10 @@ resource "google_cloud_run_service_iam_member" "commentary_public_access" {
   service  = google_cloudfunctions2_function.post_run_commentary.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+  depends_on = [
+  google_cloudfunctions2_function.post_run_commentary,
+  google_project_service.run_api
+  ]
 }
+
+

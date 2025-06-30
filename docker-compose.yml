@@ -1,5 +1,4 @@
-# Path: docker-compose.yml
-# AdaptiveSurvivors/docker-compose.yml
+# /docker-compose.yml
 
 # Orchestrates the local development environment for the Adaptive Survivors backend.
 # Sets up Kafka, Zookeeper, HDFS, Flink, and Spark.
