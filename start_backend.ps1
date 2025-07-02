@@ -4,6 +4,56 @@
 # Kafka topic creation, Flink job submission, and Kafka Connect setup.
 # Run this script from the root of your AdaptiveSurvivors monorepo:
 # PS C:\Unity\AdaptiveSurvivors> .\start_backend.ps1
+# To reset HDFS data before starting, use:
+# PS C:\Unity\AdaptiveSurvivors> .\start_backend.ps1 -ResetHDFS
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$false, HelpMessage="Resets HDFS data by stopping namenode/datanode and deleting bind-mounted data before starting other services.")]
+    [switch]$ResetHDFS
+)
+
+# Function to encapsulate HDFS reset logic
+function Reset-HDFSData {
+    Write-Host "--- HDFS Data Reset ---"
+
+    # Stop HDFS services. Handles cases where they might not be running.
+    try {
+        docker compose stop namenode datanode | Out-Null
+        Write-Host "HDFS services stopped."
+    } catch {
+        Write-Warning "Failed to stop Docker services during HDFS reset: $($_.Exception.Message)"; return $false
+    }
+
+    $namenodeDataPath = '.\data\namenode'
+    $datanodeDataPath = '.\data\datanode'
+    # Delete HDFS data directories.
+    Write-Host "Deleting HDFS data: '$namenodeDataPath', '$datanodeDataPath'..."
+    try {
+        if (Test-Path $namenodeDataPath) { Remove-Item -Path $namenodeDataPath -Recurse -Force -ErrorAction Stop | Out-Null }
+        else { Write-Host "'$namenodeDataPath' not found." }
+
+        if (Test-Path $datanodeDataPath) { Remove-Item -Path $datanodeDataPath -Recurse -Force -ErrorAction Stop | Out-Null }
+        else { Write-Host "'$datanodeDataPath' not found." }
+        Write-Host "HDFS data directories processed."
+    } catch {
+        Write-Error "Failed to delete directories during HDFS reset: $($_.Exception.Message)"; return $false
+    }
+
+    Write-Host "--- HDFS Data Reset Complete. Services will be started by main script. ---"
+    return $true
+}
+
+# --- Main Script Logic ---
+
+if ($ResetHDFS) {
+    Write-Host "--- Performing HDFS data reset as requested ---"
+    # Execute HDFS reset. Exit on failure.
+    if (-not (Reset-HDFSData)) {
+        Write-Error "HDFS reset failed. Exiting."
+        exit 1
+    }
+}
 
 Write-Host "--- Starting Docker Compose Services ---"
 docker-compose up -d --build
@@ -106,6 +156,9 @@ while (-not $topicCreationSuccess -and $attempts -lt $maxTopicAttempts) {
     try {
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic gameplay_events --partitions 1 --replication-factor 1 --if-not-exists 2>$null
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic adaptive_params --partitions 1 --replication-factor 1 --if-not-exists 2>$null
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_encounter_trigger --partitions 1 --replication-factor 1 --if-not-exists 2>$null
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic bqml_features --partitions 1 --replication-factor 1 --if-not-exists 2>$null
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_results --partitions 1 --replication-factor 1 --if-not-exists 2>$null
         Write-Host "Kafka topics created successfully."
         $topicCreationSuccess = $true
     } catch {
