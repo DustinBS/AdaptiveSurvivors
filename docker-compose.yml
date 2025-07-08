@@ -239,9 +239,13 @@ services:
     environment:
       - KAFKA_BROKERS=kafka:9092
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - GOOGLE_APPLICATION_CREDENTIALS=/gcp/service-account-key.json
     depends_on:
       kafka:
         condition: service_healthy
+    volumes:
+      - ./gcp-credentials/service-account-key.json:/gcp/service-account-key.json:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:5001/health || exit 1"]
       interval: 15s

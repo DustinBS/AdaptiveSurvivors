@@ -210,6 +210,11 @@ def run_bqml_pipeline(features: dict, boss_archetype: str):
         return None
 
 # --- API Endpoint ---
+@app.route('/health', methods=['GET'])
+def health_check():
+    """A simple health check endpoint."""
+    return jsonify({"status": "healthy"}), 200
+
 @app.route('/trigger', methods=['POST'])
 def trigger_seer_pipeline():
     data = request.get_json()

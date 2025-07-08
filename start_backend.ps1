@@ -79,112 +79,69 @@ if ($ResetHDFS) {
 }
 
 Write-Host "--- Starting Docker Compose Services ---"
-docker-compose up -d --build
+docker compose up -d --build
 
-Write-Host "--- Waiting for Zookeeper to be healthy (up to 60 seconds) ---"
-$timeout = New-TimeSpan -Seconds 60
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed -lt $timeout) {
-    $status = docker-compose ps zookeeper | Select-String "healthy"
-    if ($status) {
-        Write-Host "Zookeeper is healthy."
-        break
-    }
-    Write-Host "Waiting for Zookeeper..."
-    Start-Sleep -Seconds 5
+# This runs in parallel while the Docker containers are starting up.
+Write-Host "--- (Re)Building All Backend Job JARs (Common, Flink, Spark) ---"
+Push-Location .\Backend\
+mvn clean package
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Maven build failed. Exiting."
+    Pop-Location
+    docker compose down -v
+    exit 1
 }
-if ($sw.Elapsed -ge $timeout) {
-    Write-Error "Zookeeper did not become healthy in time. Exiting."
+Pop-Location
+Write-Host "--- Maven build complete. Proceeding with service configuration. ---"
+
+# Helper function to reduce repetitive code for health checks.
+function Wait-For-Service {
+    param(
+        [string]$ServiceName,
+        [int]$TimeoutSeconds = 120
+    )
+    Write-Host "--- Waiting for $ServiceName to be healthy (up to $TimeoutSeconds seconds) ---"
+    $timeout = New-TimeSpan -Seconds $TimeoutSeconds
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed -lt $timeout) {
+        $status = docker-compose ps $ServiceName | Select-String "healthy"
+        if ($status) {
+            Write-Host "$ServiceName is healthy."
+            return $true
+        }
+        Write-Host "Waiting for $ServiceName..."
+        Start-Sleep -Seconds 5
+    }
+    Write-Error "$ServiceName did not become healthy in time. Exiting."
     exit 1
 }
 
-Write-Host "--- Waiting for Kafka to be healthy (up to 120 seconds) ---"
-$timeout = New-TimeSpan -Seconds 120
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed -lt $timeout) {
-    $status = docker-compose ps kafka | Select-String "healthy"
-    if ($status) {
-        Write-Host "Kafka is healthy."
-        # Add a small additional buffer after health check for Kafka broker to fully initialize
-        Write-Host "Giving Kafka a few more seconds to warm up..."
-        Start-Sleep -Seconds 10 # Added extra sleep
-        break
-    }
-    Write-Host "Waiting for Kafka..."
-    Start-Sleep -Seconds 5
-}
-if ($sw.Elapsed -ge $timeout) {
-    Write-Error "Kafka did not become healthy in time. Exiting."
-    exit 1
-}
+# Wait for all core infrastructure services to be healthy before proceeding.
+Wait-For-Service -ServiceName "zookeeper" -TimeoutSeconds 60
+Wait-For-Service -ServiceName "kafka"
+Wait-For-Service -ServiceName "namenode"
+Wait-For-Service -ServiceName "jobmanager"
+Wait-For-Service -ServiceName "kafka-connect"
+Wait-For-Service -ServiceName "spark-master"
+Wait-For-Service -ServiceName "seer-orchestrator"
 
-Write-Host "--- Waiting for Namenode to be healthy (up to 120 seconds) ---"
-$timeout = New-TimeSpan -Seconds 120
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed -lt $timeout) {
-    $status = docker-compose ps namenode | Select-String "healthy"
-    if ($status) {
-        Write-Host "Namenode is healthy."
-        break
-    }
-    Write-Host "Waiting for Namenode..."
-    Start-Sleep -Seconds 5
-}
-if ($sw.Elapsed -ge $timeout) {
-    Write-Error "Namenode did not become healthy in time. Exiting."
-    exit 1
-}
-
-Write-Host "--- Waiting for Kafka-Connect to be healthy (up to 120 seconds) ---"
-$timeout = New-TimeSpan -Seconds 120
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed -lt $timeout) {
-    $status = docker-compose ps kafka-connect | Select-String "healthy"
-    if ($status) {
-        Write-Host "Kafka-Connect is healthy."
-        break
-    }
-    Write-Host "Waiting for Kafka-Connect..."
-    Start-Sleep -Seconds 5
-}
-if ($sw.Elapsed -ge $timeout) {
-    Write-Error "Kafka-Connect did not become healthy in time. Exiting."
-    exit 1
-}
-
-Write-Host "--- Waiting for Flink JobManager to be healthy (up to 120 seconds) ---"
-$timeout = New-TimeSpan -Seconds 120
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed -lt $timeout) {
-    $status = docker-compose ps jobmanager | Select-String "healthy"
-    if ($status) {
-        Write-Host "Flink JobManager is healthy."
-        break
-    }
-    Write-Host "Waiting for Flink JobManager..."
-    Start-Sleep -Seconds 5
-}
-if ($sw.Elapsed -ge $timeout) {
-    Write-Error "Flink JobManager did not become healthy in time. Exiting."
-    exit 1
-}
-
+# --- Configure running services now that they are healthy and JARs are built ---
 
 Write-Host "--- Creating Kafka Topics (if they don't exist) ---"
-# Loop to ensure Kafka topics can be created, indicating Kafka is truly ready for topics API
 $topicCreationSuccess = $false
 $attempts = 0
 $maxTopicAttempts = 10
 while (-not $topicCreationSuccess -and $attempts -lt $maxTopicAttempts) {
     try {
-        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic gameplay_events --partitions 1 --replication-factor 1 --if-not-exists 2>$null
-        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic adaptive_params --partitions 1 --replication-factor 1 --if-not-exists 2>$null
-        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic bqml_features --partitions 1 --replication-factor 1 --if-not-exists 2>$null
-        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_results --partitions 1 --replication-factor 1 --if-not-exists 2>$null
+        Write-Host "Attempting to create Kafka topics (Attempt $($attempts + 1)/$maxTopicAttempts)..."
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic gameplay_events --partitions 1 --replication-factor 1 --if-not-exists
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic adaptive_params --partitions 1 --replication-factor 1 --if-not-exists
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic bqml_features --partitions 1 --replication-factor 1 --if-not-exists
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_results --partitions 1 --replication-factor 1 --if-not-exists
         Write-Host "Kafka topics created successfully."
         $topicCreationSuccess = $true
     } catch {
-        Write-Host "Kafka not ready for topic creation yet. Retrying in 5 seconds..."
+        Write-Warning "Kafka not ready for topic creation yet. Retrying in 5 seconds..."
         Start-Sleep -Seconds 5
         $attempts++
     }
@@ -194,66 +151,40 @@ if (-not $topicCreationSuccess) {
     exit 1
 }
 
+Write-Host "--- Creating HDFS directories for Kafka Connect ---"
+docker exec namenode hdfs dfs -mkdir -p /topics /logs
+docker exec namenode hdfs dfs -chmod -R 777 /topics /logs
+Write-Host "HDFS directories created and permissions set."
 
-# --- Consolidated Build Step for All Maven Modules ---
-Write-Host "--- (Re)Building All Backend Job JARs (Common, Flink, Spark) ---"
-Push-Location .\Backend\
-mvn clean package
-Pop-Location
+Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
+try {
+    # Attempt to delete the connector first (in case it exists from a previous run), then create it.
+    try { Invoke-RestMethod -Uri http://localhost:8083/connectors/hdfs-sink-combined-events -Method Delete } catch {}
+    Invoke-RestMethod -Uri http://localhost:8083/connectors -Method Post -ContentType 'Application/json' -Body (Get-Content -Raw -Path ./Backend/KafkaConnect/connectors/hdfs-sink-gameplay-events.json)
+    Write-Host "HDFS Sink connector submitted."
+} catch {
+    Write-Error "Failed to create or update connector hdfs-sink-combined-events: $($_.Exception.Message)"
+}
 
 Write-Host "--- Cancelling and Resubmitting Flink Job ---"
 $flinkJobName = "Unified Player Profile & Feature Job"
 try {
-    $jobList = docker exec jobmanager flink list -r
-    $jobId = ($jobList | Select-String -Pattern "($flinkJobName)" | ForEach-Object { if ($_ -match '([0-9a-fA-F]{32})') { $Matches[1] } })
+    $jobId = (docker exec jobmanager flink list -r | Select-String -Pattern $flinkJobName | ForEach-Object { if ($_ -match '([0-9a-fA-F]{32})') { $Matches[1] } })
     if ($jobId) {
         Write-Host "Found and cancelling running Flink job '$flinkJobName' (ID: $jobId)..."
         docker exec jobmanager flink cancel $jobId
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 3 # Give Flink a moment to process the cancellation
     }
-} catch {
-    Write-Warning "Could not check or cancel Flink job: $($_.Exception.Message)"
-}
+} catch { Write-Warning "Could not check or cancel Flink job: $($_.Exception.Message)" }
+# Submit the new job by copying the JAR and running it.
 docker cp .\Backend\FlinkJobs\target\AdaptiveSurvivorsFlinkJobs-1.0-SNAPSHOT.jar jobmanager:/tmp/AdaptiveSurvivorsFlinkJobs.jar
 docker exec jobmanager flink run -d /tmp/AdaptiveSurvivorsFlinkJobs.jar
 Write-Host "Flink job submitted."
 
-Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
-try {
-    try { Invoke-RestMethod -Uri http://localhost:8083/connectors/hdfs-sink-combined-events -Method Delete } catch {}; Invoke-RestMethod -Uri http://localhost:8083/connectors -Method Post -ContentType 'Application/json' -Body (Get-Content -Raw -Path ./Backend/KafkaConnect/connectors/hdfs-sink-gameplay-events.json)
-} catch {
-    # This error is expected if the connector already exists, so we just log it as a warning
-    Write-Warning "Connector hdfs-sink-gameplay-events might already exist or there was another issue: $($_.Exception.Message)"
-}
-
-Write-Host "--- Waiting for Seer Orchestrator to be healthy (up to 120 seconds) ---"
-$timeout = New-TimeSpan -Seconds 120
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed -lt $timeout) {
-    $status = docker-compose ps seer-orchestrator | Select-String "healthy"
-    if ($status) {
-        Write-Host "Seer Orchestrator is healthy."
-        break
-    }
-    Write-Host "Waiting for Seer Orchestrator..."
-    Start-Sleep -Seconds 5
-}
-if ($sw.Elapsed -ge $timeout) {
-    Write-Error "Seer Orchestrator did not become healthy in time. Exiting."
-    exit 1
-}
-
-Write-Host "--- Creating HDFS directories for Kafka Connect ---"
-docker exec namenode hdfs dfs -mkdir -p /topics
-docker exec namenode hdfs dfs -mkdir -p /logs
-docker exec namenode hdfs dfs -chmod 777 /topics
-docker exec namenode hdfs dfs -chmod 777 /logs
-
-Write-Host "HDFS directories created and permissions set."
-
 Write-Host "--- Submitting Spark Jobs and Configs to Spark Master ---"
 docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
 docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties spark-master:/opt/bitnami/spark/conf/log4j.properties
+
 # 1. Run the Bootstrap Listener job. It waits in the background for a 'play_session_started' event.
 Write-Host "--- Launching Spark Streaming Job: BootstrapTriggerListenerJob ---"
 docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `
