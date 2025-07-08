@@ -22,7 +22,7 @@ resource "google_storage_bucket" "spark_temp_bucket" {
 
 # 2. BigQuery Dataset for ML model training data.
 resource "google_bigquery_dataset" "staging_dataset" {
-  dataset_id                 = "gameplay_data_staging"
+  dataset_id                 = "seer_training_workspace"
   location                   = var.gcp_region
   delete_contents_on_destroy = true
   default_table_expiration_ms = 86400000 # 1 day

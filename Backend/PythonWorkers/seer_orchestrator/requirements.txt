@@ -1,0 +1,6 @@
+# /Backend/PythonWorkers/seer_orchestrator/requirements.txt
+flask
+kafka-python
+google-generativeai
+google-cloud-bigquery
+werkzeug==2.2.2

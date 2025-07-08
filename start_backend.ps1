@@ -44,8 +44,31 @@ function Reset-HDFSData {
     return $true
 }
 
-# --- Main Script Logic ---
+# Helper function to parse a .env file and load variables into the session
+function Import-EnvFile {
+    param(
+        [string]$Path = ".env"
+    )
+    if (Test-Path $Path) {
+        Get-Content $Path | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and !$line.StartsWith("#")) {
+                $parts = $line.Split("=", 2)
+                if ($parts.Length -eq 2) {
+                    $key = $parts[0].Trim()
+                    $value = $parts[1].Trim()
+                    [System.Environment]::SetEnvironmentVariable($key, $value, "Process")
+                    Write-Host "Loaded env var: $key"
+                }
+            }
+        }
+    } else {
+        Write-Warning ".env file not found at path: $Path"
+    }
+}
 
+# --- Main Script Logic ---
+Import-EnvFile
 if ($ResetHDFS) {
     Write-Host "--- Performing HDFS data reset as requested ---"
     # Execute HDFS reset. Exit on failure.
@@ -156,7 +179,6 @@ while (-not $topicCreationSuccess -and $attempts -lt $maxTopicAttempts) {
     try {
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic gameplay_events --partitions 1 --replication-factor 1 --if-not-exists 2>$null
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic adaptive_params --partitions 1 --replication-factor 1 --if-not-exists 2>$null
-        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_encounter_trigger --partitions 1 --replication-factor 1 --if-not-exists 2>$null
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic bqml_features --partitions 1 --replication-factor 1 --if-not-exists 2>$null
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_results --partitions 1 --replication-factor 1 --if-not-exists 2>$null
         Write-Host "Kafka topics created successfully."
@@ -179,30 +201,21 @@ mvn clean package
 Pop-Location
 
 Write-Host "--- Cancelling and Resubmitting Flink Job ---"
-
-$flinkJobName = "Adaptive Survivors Player Profile and Adaptive Parameters Job"
+$flinkJobName = "Unified Player Profile & Feature Job"
 try {
-    # Attempt to find and cancel the running job
-    $jobList = docker exec jobmanager flink list -r -s
-    $jobId = ($jobList | Select-String -Pattern ([regex]::Escape($flinkJobName)) | ForEach-Object {
-        if ($_ -match '([0-9a-fA-F]{32})') { $Matches[1] }
-    })
-
+    $jobList = docker exec jobmanager flink list -r
+    $jobId = ($jobList | Select-String -Pattern "($flinkJobName)" | ForEach-Object { if ($_ -match '([0-9a-fA-F]{32})') { $Matches[1] } })
     if ($jobId) {
-        Write-Host "Found and cancelling Flink job '$flinkJobName' (ID: $jobId)..."
+        Write-Host "Found and cancelling running Flink job '$flinkJobName' (ID: $jobId)..."
         docker exec jobmanager flink cancel $jobId
-        Start-Sleep -Seconds 10
-    } else {
-        Write-Host "No running job '$flinkJobName' found."
+        Start-Sleep -Seconds 5
     }
 } catch {
-    Write-Warning "Failed to check or cancel Flink job: $($_.Exception.Message)"
+    Write-Warning "Could not check or cancel Flink job: $($_.Exception.Message)"
 }
-
-# Copy and submit the new JAR
 docker cp .\Backend\FlinkJobs\target\AdaptiveSurvivorsFlinkJobs-1.0-SNAPSHOT.jar jobmanager:/tmp/AdaptiveSurvivorsFlinkJobs.jar
 docker exec jobmanager flink run -d /tmp/AdaptiveSurvivorsFlinkJobs.jar
-Write-Host "Flink Job submitted."
+Write-Host "Flink job submitted."
 
 Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
 try {
@@ -210,6 +223,23 @@ try {
 } catch {
     # This error is expected if the connector already exists, so we just log it as a warning
     Write-Warning "Connector hdfs-sink-gameplay-events might already exist or there was another issue: $($_.Exception.Message)"
+}
+
+Write-Host "--- Waiting for Seer Orchestrator to be healthy (up to 120 seconds) ---"
+$timeout = New-TimeSpan -Seconds 120
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+while ($sw.Elapsed -lt $timeout) {
+    $status = docker-compose ps seer-orchestrator | Select-String "healthy"
+    if ($status) {
+        Write-Host "Seer Orchestrator is healthy."
+        break
+    }
+    Write-Host "Waiting for Seer Orchestrator..."
+    Start-Sleep -Seconds 5
+}
+if ($sw.Elapsed -ge $timeout) {
+    Write-Error "Seer Orchestrator did not become healthy in time. Exiting."
+    exit 1
 }
 
 Write-Host "--- Creating HDFS directories for Kafka Connect ---"
@@ -224,9 +254,30 @@ Write-Host "--- (re)Building Spark Batch Job ---"
 Push-Location .\Backend\SparkJobs\
 mvn clean package
 Pop-Location
-Write-Host "--- Submitting Spark Jobs and configs to Spark Master ---"
-docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
+Write-Host "--- Submitting Spark Jobs and Configs to Spark Master ---"
+docker cp .\Backend\SparkJobs\target\spark-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
 docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties spark-master:/opt/bitnami/spark/conf/log4j.properties
+# 1. Run the Bootstrap Listener job. It waits in the background for a 'play_session_started' event.
+Write-Host "--- Launching Spark Streaming Job: BootstrapTriggerListenerJob ---"
+docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `
+    --class com.adaptivesurvivors.spark.BootstrapTriggerListenerJob `
+    --master spark://spark-master:7077 `
+    --deploy-mode client `
+    --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:/opt/bitnami/spark/conf/log4j.properties" `
+    /tmp/AdaptiveSurvivorsSparkJobs.jar `
+    --gcp-project-id=$env:GCP_PROJECT_ID `
+    --gcs-temp-bucket=$env:GCS_TEMP_BUCKET
+
+# 2. Run the Enrichment job. It continuously listens for 'boss_fight_completed' events.
+Write-Host "--- Launching Spark Streaming Job: EnrichAndPersistTrainingRecordJob ---"
+docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `
+    --class com.adaptivesurvivors.spark.EnrichAndPersistTrainingRecordJob `
+    --master spark://spark-master:7077 `
+    --deploy-mode client `
+    --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:/opt/bitnami/spark/conf/log4j.properties" `
+    /tmp/AdaptiveSurvivorsSparkJobs.jar `
+    --gcp-project-id=$env:GCP_PROJECT_ID `
+    --gcs-temp-bucket=$env:GCS_TEMP_BUCKET
 
 Write-Host "--- Backend Services Setup Complete ---"
 Write-Host "You can now run your Unity game and perform actions."
@@ -235,3 +286,4 @@ Write-Host "To debug Flink job errors, run: docker logs jobmanager"
 Write-Host "To check HDFS: http://localhost:9870/explorer.html"
 Write-Host "To check Kafka Connect: http://localhost:8083/connectors"
 Write-Host "To check Spark workers: http://localhost:8080"
+Write-Host "To check Python workers: http://seer-orchestrator:5001/health"
