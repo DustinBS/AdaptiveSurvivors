@@ -1,5 +1,5 @@
-// Backend/SparkJobs/src/main/scala/com/adaptivesurvivors/spark/models/SharedDataModels.scala
-package com.adaptivesurvivors.spark.models
+// Backend/common-models/src/main/scala/com/adaptivesurvivors/models/SharedDataModels.scala
+package com.adaptivesurvivors.models
 
 /**
  * This case class is the Single Source of Truth for the Seer's feature vector.

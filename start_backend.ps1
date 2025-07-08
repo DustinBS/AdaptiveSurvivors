@@ -195,8 +195,9 @@ if (-not $topicCreationSuccess) {
 }
 
 
-Write-Host "--- (re)Building Flink Job JAR ---"
-Push-Location .\Backend\FlinkJobs\
+# --- Consolidated Build Step for All Maven Modules ---
+Write-Host "--- (Re)Building All Backend Job JARs (Common, Flink, Spark) ---"
+Push-Location .\Backend\
 mvn clean package
 Pop-Location
 
@@ -250,12 +251,8 @@ docker exec namenode hdfs dfs -chmod 777 /logs
 
 Write-Host "HDFS directories created and permissions set."
 
-Write-Host "--- (re)Building Spark Batch Job ---"
-Push-Location .\Backend\SparkJobs\
-mvn clean package
-Pop-Location
 Write-Host "--- Submitting Spark Jobs and Configs to Spark Master ---"
-docker cp .\Backend\SparkJobs\target\spark-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
+docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
 docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties spark-master:/opt/bitnami/spark/conf/log4j.properties
 # 1. Run the Bootstrap Listener job. It waits in the background for a 'play_session_started' event.
 Write-Host "--- Launching Spark Streaming Job: BootstrapTriggerListenerJob ---"

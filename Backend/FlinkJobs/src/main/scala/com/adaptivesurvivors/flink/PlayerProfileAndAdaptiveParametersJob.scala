@@ -1,7 +1,7 @@
 // Backend/FlinkJobs/src/main/scala/com/adaptivesurvivors/flink/PlayerProfileAndAdaptiveParametersJob.scala
 package com.adaptivesurvivors.flink
 
-import com.adaptivesurvivors.spark.models.FeatureVector
+import com.adaptivesurvivors.models.FeatureVector
 import com.google.gson.{Gson, GsonBuilder}
 import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichMapFunction
