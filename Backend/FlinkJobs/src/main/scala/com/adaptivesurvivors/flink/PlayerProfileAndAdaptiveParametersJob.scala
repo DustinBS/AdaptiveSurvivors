@@ -313,7 +313,10 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
             outStream.close()
             logger.info(s"Cached feature vector to HDFS: $path")
         } match {
-            case Failure(e) => logger.error(s"Failed to write to HDFS cache at $path", e)
+            case Success(_) =>
+                logger.info(s"Cached feature vector to HDFS: $path")
+            case Failure(e) =>
+                logger.error(s"Failed to write to HDFS cache at $path", e)
         }
 
         // 3. Trigger Python orchestrator via HTTP
