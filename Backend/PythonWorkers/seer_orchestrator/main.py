@@ -7,6 +7,7 @@ import random
 import threading
 import time
 import math
+import uuid
 from flask import Flask, request, jsonify
 from kafka import KafkaProducer, KafkaConsumer
 import google.generativeai as genai
@@ -219,11 +220,11 @@ def health_check():
 def trigger_seer_pipeline():
     data = request.get_json()
     run_id = data.get("run_id")
+    encounter_id = data.get("encounterId", str(uuid.uuid4()))
     boss_archetype = "melee" # Default, should be passed from Flink
     if not run_id:
         return jsonify({"status": "error", "message": "Missing 'run_id'"}), 400
-
-    logging.info(f"Orchestrator triggered for run_id: {run_id}")
+    logging.info(f"Orchestrator triggered for run_id: {run_id}, encounterId: {encounter_id}")
 
     # Poll the cache for the feature vector
     features = None
@@ -275,11 +276,10 @@ def trigger_seer_pipeline():
                     })
 
     # Produce final result to Kafka
-    # Note: `encounterId` should ideally be passed from Flink in the trigger request body.
     # 1. Assemble the inner payload, which matches the SeerResultPayload in C#
     seer_result_payload = {
         "playerId": features.get("player_id", "unknown") if features else "unknown_player",
-        "encounterId": data.get("encounterId", "0"),
+        "encounterId": encounter_id,
         "dialogue": dialogue,
         "choices": choices
     }

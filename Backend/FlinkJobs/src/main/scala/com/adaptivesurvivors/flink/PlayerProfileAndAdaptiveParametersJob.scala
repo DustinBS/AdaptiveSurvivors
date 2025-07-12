@@ -168,8 +168,8 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
         // HDFS FileSystem is managed by Hadoop's FileSystem cache, no need for explicit close here.
     }
 
-    override def processElement(event: GameplayEvent, ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context, out: Collector[Unit]): Unit = {
-        val profile = Option(profileState.value()).getOrElse(new PlayerProfile(event.player_id, event.run_id))
+  override def processElement(event: GameplayEvent, ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context, out: Collector[Unit]): Unit = {
+      val profile = Option(profileState.value()).getOrElse(new PlayerProfile(event.player_id, event.run_id))
 
         // --- Unified State Update Logic ---
         event.event_type match {
@@ -205,7 +205,7 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
                 profile.upgradeCounts = profile.upgradeCounts.updated(id, profile.upgradeCounts.getOrElse(id, 0) + 1)
 
             case "seer_encounter_begin" =>
-                processSeerEncounter(profile, ctx)
+                processSeerEncounter(profile, event.payload, ctx)
 
             case _ => // Ignore other events
         }
@@ -289,7 +289,7 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
       profile.activeStaleTimer = newTimer
     }
 
-    private def processSeerEncounter(profile: PlayerProfile, ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context): Unit = {
+    private def processSeerEncounter(profile: PlayerProfile, eventPayload: java.util.Map[String, AnyRef], ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context): Unit = {
         logger.info(s"Seer encounter triggered for run_id: ${ctx.getCurrentKey}. Processing...")
 
         val avgHp = if (profile.hpHistory.isEmpty) 1.0 else profile.hpHistory.sum / profile.hpHistory.size
@@ -320,9 +320,10 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
         }
 
         // 3. Trigger Python orchestrator via HTTP
+        val encounterId = Try(eventPayload.get("encounter_id").toString).getOrElse(java.util.UUID.randomUUID().toString)
         val postRequest = new HttpPost(orchestratorUrl)
         postRequest.setHeader("Content-Type", "application/json")
-        postRequest.setEntity(new StringEntity(s"""{"run_id": "${profile.runId}"}"""))
+        postRequest.setEntity(new StringEntity(s"""{"run_id": "${profile.runId}", "encounterId": "$encounterId"}"""))
         Try(httpClient.execute(postRequest)) match {
             case Success(response) =>
                 logger.info(s"Triggered seer-orchestrator for run_id ${profile.runId}. Response: ${response.getStatusLine.getStatusCode}")
