@@ -276,10 +276,25 @@ def trigger_seer_pipeline():
 
     # Produce final result to Kafka
     # Note: `encounterId` should ideally be passed from Flink in the trigger request body.
-    final_payload = { "playerId": features.get("player_id", "unknown") if features else "unknown", "encounterId": "0", "dialogue": dialogue, "choices": choices }
-    producer.send("seer_results", value=final_payload)
+    # 1. Assemble the inner payload, which matches the SeerResultPayload in C#
+    seer_result_payload = {
+        "playerId": features.get("player_id", "unknown") if features else "unknown_player",
+        "encounterId": data.get("encounterId", "0"),
+        "dialogue": dialogue,
+        "choices": choices
+    }
+
+    # 2. Wrap the inner payload in the required envelope structure
+    final_envelope = {
+        "message_type": "seer_result_update",
+        # The inner payload must be serialized into a JSON string here
+        "payload": json.dumps(seer_result_payload)
+    }
+
+    # 3. Send the complete envelope to Kafka
+    producer.send("seer_results", value=final_envelope)
     producer.flush()
-    logging.info(f"Successfully produced Seer result to Kafka for run_id: {run_id}")
+    logging.info(f"Successfully produced Seer result envelope to Kafka for run_id: {run_id}")
     return jsonify({"status": "success", "message": "Seer result produced"}), 200
 
 # --- Main Execution ---
