@@ -127,7 +127,9 @@ object EnrichAndPersistTrainingRecordJob {
 
     logger.info("--- Initializing Spark Session for Post-Run Enrichment ---")
     val spark = SparkSession.builder()
-      .appName("Adaptive Survivors Post-Run Enrichment")
+      .appName("Gameplay-Enrichment-Stream")
+      .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem")
+      .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS")
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 

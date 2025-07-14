@@ -103,7 +103,7 @@ services:
     hostname: jobmanager
     container_name: jobmanager
     ports:
-      - "8081:8081" # Flink Web UI
+      - "8082:8081" # Flink Web UI
     command: jobmanager
     environment:
       FLINK_PROPERTIES_FILE: /opt/flink/conf/flink-conf.yaml
@@ -203,6 +203,7 @@ services:
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
       SPARK_BQ_DATASET: ${SPARK_BQ_DATASET}
       GCS_TEMP_BUCKET: ${GCS_TEMP_BUCKET}
+      SPARK_PUBLIC_DNS: localhost
     env_file:
       - ./.env
     volumes:
@@ -219,14 +220,18 @@ services:
     image: bitnami/spark:3.2.0
     hostname: spark-worker
     container_name: spark-worker
+    ports:
+      - "8081:8081" # Expose the Spark Worker Web UI port
     command: "/opt/bitnami/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://${SPARK_MASTER_HOST}:7077"
     environment:
+      SPARK_MASTER_HOST: spark-master
       SPARK_MODE: worker
       SPARK_MASTER_URL: spark://${SPARK_MASTER_HOST}:7077
-      SPARK_WORKER_CORES: 1
-      SPARK_WORKER_MEMORY: 1G
+      SPARK_WORKER_CORES: 4
+      SPARK_WORKER_MEMORY: 2G
       HADOOP_CONF_DIR: /opt/bitnami/spark/conf
       GOOGLE_APPLICATION_CREDENTIALS: /opt/gcp/service-account-key.json
+      SPARK_PUBLIC_DNS: localhost
     env_file:
       - ./.env
     volumes:

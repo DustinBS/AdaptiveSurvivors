@@ -78,6 +78,8 @@ if ($ResetHDFS) {
     }
 }
 
+Write-Host "--- Stopping Any Docker Compose Services ---"
+docker compose down -v
 Write-Host "--- Starting Docker Compose Services ---"
 docker compose up -d --build
 
@@ -151,9 +153,9 @@ if (-not $topicCreationSuccess) {
     exit 1
 }
 
-Write-Host "--- Creating HDFS directories for Kafka Connect ---"
-docker exec namenode hdfs dfs -mkdir -p /topics /logs /feature_store/live /training_data
-docker exec namenode hdfs dfs -chmod -R 777 /topics /logs /feature_store /training_data
+Write-Host "--- Creating HDFS directories for Kafka Connect and Spark application JARs ---"
+docker exec namenode hdfs dfs -mkdir -p /topics /logs /feature_store/live /training_data /apps/spark
+docker exec namenode hdfs dfs -chmod -R 777 /topics /logs /feature_store /training_data /apps/spark
 Write-Host "HDFS directories created and permissions set."
 
 Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
@@ -182,32 +184,45 @@ docker exec jobmanager flink run -d /tmp/AdaptiveSurvivorsFlinkJobs.jar
 Write-Host "Flink job submitted."
 
 Write-Host "--- Submitting Spark Jobs and Configs to Spark Master ---"
-docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar spark-master:/tmp/AdaptiveSurvivorsSparkJobs.jar
-docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties spark-master:/opt/bitnami/spark/conf/log4j.properties
+# 1. Copy the JAR and log4j.properties into HDFS namenode container
+docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar namenode:/tmp/AdaptiveSurvivorsSparkJobs.jar
+docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties namenode:/tmp/log4j.properties
 
-# 1. Run the Bootstrap Listener job. It waits in the background for a 'play_session_started' event.
+# 2. From the namenode container, copy into HDFS, making it cluster-accessible
+docker exec namenode hdfs dfs -put -f /tmp/AdaptiveSurvivorsSparkJobs.jar /apps/spark/AdaptiveSurvivorsSparkJobs.jar
+docker exec namenode hdfs dfs -put -f /tmp/log4j.properties /apps/spark/log4j.properties
+
 Write-Host "--- Launching Spark Streaming Job: BootstrapTriggerListenerJob ---"
 docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `
     --class com.adaptivesurvivors.spark.BootstrapTriggerListenerJob `
     --master spark://spark-master:7077 `
-    --deploy-mode client `
-    --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:/opt/bitnami/spark/conf/log4j.properties" `
-    /tmp/AdaptiveSurvivorsSparkJobs.jar `
+    --deploy-mode cluster `
+    --driver-memory 512m `
+    --executor-memory 512m `
+    --total-executor-cores 1 `
+    --files hdfs://namenode:9000/apps/spark/log4j.properties `
+    --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:log4j.properties" `
+    --conf "spark.executor.extraJavaOptions=-Dlog4j.configuration=file:log4j.properties" `
+    hdfs://namenode:9000/apps/spark/AdaptiveSurvivorsSparkJobs.jar `
     --gcp-project-id=$env:GCP_PROJECT_ID `
     --gcs-temp-bucket=$env:GCS_TEMP_BUCKET
 
-# 2. Run the Enrichment job. It continuously listens for 'boss_fight_completed' events.
 Write-Host "--- Launching Spark Streaming Job: EnrichAndPersistTrainingRecordJob ---"
 docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `
     --class com.adaptivesurvivors.spark.EnrichAndPersistTrainingRecordJob `
     --master spark://spark-master:7077 `
-    --deploy-mode client `
-    --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:/opt/bitnami/spark/conf/log4j.properties" `
-    /tmp/AdaptiveSurvivorsSparkJobs.jar
+    --deploy-mode cluster `
+    --driver-memory 512m `
+    --executor-memory 512m `
+    --total-executor-cores 1 `
+    --files hdfs://namenode:9000/apps/spark/log4j.properties `
+    --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:log4j.properties" `
+    --conf "spark.executor.extraJavaOptions=-Dlog4j.configuration=file:log4j.properties" `
+    hdfs://namenode:9000/apps/spark/AdaptiveSurvivorsSparkJobs.jar
 
 Write-Host "--- Backend Services Setup Complete ---"
 Write-Host "You can now run your Unity game and perform actions."
-Write-Host "Check Kafka consumer logs and Flink UI (http://localhost:8081) for data flow."
+Write-Host "Check Kafka consumer logs and Flink UI (http://localhost:8082) for data flow."
 Write-Host "To debug Flink job errors, run: docker logs jobmanager"
 Write-Host "To check HDFS: http://localhost:9870/explorer.html"
 Write-Host "To check Kafka Connect: http://localhost:8083/connectors"

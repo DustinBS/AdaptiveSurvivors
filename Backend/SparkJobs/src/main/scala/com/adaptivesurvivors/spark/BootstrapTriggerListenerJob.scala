@@ -5,7 +5,8 @@ import org.apache.log4j.{Level, Logger}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
+import scala.util.Try
 
 /**
  * A lightweight Spark Streaming job that listens for a single 'play_session_started' event
@@ -22,9 +23,9 @@ object BootstrapTriggerListenerJob {
     // We only need to know the event occurred, so schema is minimal.
   ))
 
-  val historicalTrainingDataSchema: StructType = StructType(Seq(
+  // This schema must be kept in sync with the columns selected in the EnrichAndPersistTrainingRecordJob.
+  val trainingTableSchema: StructType = StructType(Seq(
     StructField("run_id", StringType, nullable = false),
-    StructField("boss_archetype", StringType, nullable = false), // Critical for splitting data
     StructField("total_dashes", LongType, nullable = true),
     StructField("total_damage_dealt", DoubleType, nullable = true),
     StructField("total_damage_taken", DoubleType, nullable = true),
@@ -53,7 +54,9 @@ object BootstrapTriggerListenerJob {
     val gcsTempBucket = params.get("--gcs-temp-bucket")
 
     val spark = SparkSession.builder()
-      .appName("Adaptive Survivors Bootstrap Trigger Listener")
+      .appName("HDFS-to-BigQuery-Bootstrap")
+      .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem")
+      .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS")
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
@@ -99,26 +102,45 @@ object BootstrapTriggerListenerJob {
    */
   def runBootstrap(spark: SparkSession, hdfsPath: String, projectId: String, dataset: String, tempBucket: String, logger: Logger): Unit = {
     logger.info(s"Reading historical training data from: $hdfsPath")
-    val historicalDF = spark.read.schema(historicalTrainingDataSchema).json(s"$hdfsPath/*/*.json")
+
+    // Read historical data if the path exists. Partition discovery adds the 'boss_archetype' column.
+    val historicalDF = Try(spark.read.json(hdfsPath)).getOrElse(spark.emptyDataFrame)
     historicalDF.cache()
 
-    logger.info(s"Loaded ${historicalDF.count()} historical records. Writing to BigQuery.")
+    logger.info(s"Loaded ${historicalDF.count()} historical records. Hydrating BigQuery tables.")
     spark.conf.set("temporaryGcsBucket", tempBucket)
 
     val archetypeTables = Map("melee" -> "melee_training_data", "ranged" -> "ranged_training_data", "final" -> "final_training_data")
+
     archetypeTables.foreach { case (archetype, tableName) =>
       val bqTableId = s"$projectId:$dataset.$tableName"
-      val archetypeDF = historicalDF.filter(col("boss_archetype") === archetype)
+
+      // Filter for the current archetype's data.
+      val archetypeDF = if (historicalDF.columns.contains("boss_archetype")) {
+          historicalDF.filter(col("boss_archetype") === archetype)
+      } else {
+          spark.emptyDataFrame
+      }
 
       if (!archetypeDF.isEmpty) {
+        // If data exists, write it to BigQuery, overwriting the table.
         logger.info(s"Writing ${archetypeDF.count()} records for '$archetype' to $bqTableId with SaveMode.Overwrite")
-        archetypeDF.write
+        archetypeDF
+          .drop("boss_archetype") // The archetype is implicit in the table name, not a column.
+          .write
           .format("bigquery")
           .option("table", bqTableId)
           .mode(SaveMode.Overwrite)
           .save()
       } else {
-        logger.warn(s"No historical data found for archetype '$archetype'.")
+        // If NO data exists, create an empty table with the correct schema.
+        logger.warn(s"No historical data for '$archetype'. Creating empty table at $bqTableId.")
+        val emptyDF = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], trainingTableSchema)
+        emptyDF.write
+          .format("bigquery")
+          .option("table", bqTableId)
+          .mode(SaveMode.Overwrite) // Overwrite will create the table if it doesn't exist.
+          .save()
       }
     }
     historicalDF.unpersist()

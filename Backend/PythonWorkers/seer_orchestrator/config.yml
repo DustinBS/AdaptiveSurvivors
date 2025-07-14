@@ -2,9 +2,19 @@
 # Seer Orchestrator Configuration
 # This file is mounted into the Docker container and can be changed without rebuilding the image.
 
+# --- Trigger ---
+# To trigger a reload, use the endpoint e.g.
+# curl -X POST http://localhost:5001/reload-config
+
 # --- Scaling ---
 # Controls how dramatically bargain strength increases with prediction confidence.
 # A higher value means more significant buffs/debuffs at high confidence.
+#
+# Note: In the application logic (scale_modifier function), any 'confidence' value
+# less than 0.5 is automatically clamped to 0.5 before scaling calculations.
+# This ensures a baseline effect and prevents extreme negative or weak modifiers
+# when prediction confidence is very low.
+
 confidence_scaling_factor: 1.5
 
 # --- Mappings ---
@@ -80,6 +90,7 @@ prompts:
 
 # --- Fallbacks ---
 # Fallback choices used when the BQML or Gemini pipeline fails.
+# These provide a default user experience in case of errors, preventing service interruption.
 fallback_choices:
   buffs:
     - { description: "A sliver of fortitude. (+20% Max HP)", buffs: [{ targetStat: "MaxHealth", modifier: 0.20, isPercentage: True, duration: 180 }], debuffs: [] }
@@ -100,7 +111,11 @@ app_settings:
   default_boss_archetype: "melee"
   # Default BigQuery dataset if the BIGQUERY_DATASET environment variable is not set.
   bigquery_default_dataset: "seer_training_workspace"
-  # Kafka topic names used by the service.
+  # Kafka topic names and consumer group ID used by the service.
+    # Note: Changes to 'consumer_topic' or 'consumer_group_id' here will NOT be
+    # hot-reloaded by the running Kafka consumer thread. A full application restart
+    # is required for these specific Kafka consumer settings to take effect,
+    # as the consumer client is initialized once with these values.
   kafka_topics:
     # Topic to consume feature vectors from.
     consumer_topic: "bqml_features"
