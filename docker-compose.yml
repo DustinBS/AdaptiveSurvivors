@@ -111,6 +111,7 @@ services:
       FLINK_BIND_HOST: 0.0.0.0
       JOB_MANAGER_RPC_ADDRESS: jobmanager
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      HDFS_FEATURE_CACHE_PATH: ${HDFS_FEATURE_CACHE_PATH}
     env_file:
       - ./.env
     volumes:
@@ -131,6 +132,7 @@ services:
       FLINK_TASK_MANAGER_NUMBER_OF_TASK_SLOTS: 1
       FLINK_PROPERTIES: "jobmanager.rpc.address: jobmanager"
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      HDFS_FEATURE_CACHE_PATH: ${HDFS_FEATURE_CACHE_PATH}
     env_file:
       - ./.env
     volumes:
@@ -196,6 +198,11 @@ services:
       SPARK_MASTER_PORT: 7077
       HADOOP_CONF_DIR: /opt/bitnami/spark/conf
       GOOGLE_APPLICATION_CREDENTIALS: /opt/gcp/service-account-key.json
+      HDFS_FEATURE_CACHE_PATH: ${HDFS_FEATURE_CACHE_PATH}
+      HDFS_DATA_LAKE_PATH: ${HDFS_DATA_LAKE_PATH}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      SPARK_BQ_DATASET: ${SPARK_BQ_DATASET}
+      GCS_TEMP_BUCKET: ${GCS_TEMP_BUCKET}
     env_file:
       - ./.env
     volumes:
@@ -246,6 +253,7 @@ services:
         condition: service_healthy
     volumes:
       - ./gcp-credentials/service-account-key.json:/gcp/service-account-key.json:ro
+      - ./Backend/PythonWorkers/seer_orchestrator/config.yml:/app/config.yml:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:5001/health || exit 1"]
       interval: 15s

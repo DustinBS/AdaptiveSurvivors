@@ -20,4 +20,4 @@ COPY main.py .
 
 # Expose the port the application will run on and command to run the app
 EXPOSE 5001
-CMD ["flask", "--app", "main", "run", "--host=0.0.0.0", "--port=5001"]
+CMD ["python", "main.py"]

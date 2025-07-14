@@ -14,9 +14,6 @@ import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsIni
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.util.Collector
-import org.apache.http.client.methods.HttpPost
-import org.apache.http.entity.StringEntity
-import org.apache.http.impl.client.HttpClients
 import org.slf4j.{Logger, LoggerFactory}
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
@@ -101,6 +98,11 @@ object PlayerProfileAndAdaptiveParametersJob {
     val orchestratorUrl = sys.env.getOrElse("SEER_ORCHESTRATOR_URL", "http://seer-orchestrator:5001/trigger")
     val hdfsFeatureCachePath = sys.env.getOrElse("HDFS_FEATURE_CACHE_PATH", "hdfs://namenode:9000/feature_store/live")
 
+    // Pass HDFS path to the job configuration
+    val globalJobParams = new Configuration()
+    globalJobParams.setString("HDFS_FEATURE_CACHE_PATH", hdfsFeatureCachePath)
+    env.getConfig.setGlobalJobParameters(globalJobParams)
+
     // --- Kafka Source ---
     val kafkaSource = KafkaSource.builder[String]()
       .setBootstrapServers(kafkaBootstrapServers)
@@ -151,7 +153,6 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
     @transient private var profileState: ValueState[PlayerProfile] = _
     @transient private var gson: Gson = _
     @transient private var logger: Logger = _
-    @transient private var httpClient: org.apache.http.impl.client.CloseableHttpClient = _
     @transient private var hdfsFileSystem: org.apache.hadoop.fs.FileSystem = _
 
     override def open(parameters: Configuration): Unit = {
@@ -159,12 +160,31 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
         profileState = getRuntimeContext.getState(descriptor)
         gson = new GsonBuilder().create()
         logger = LoggerFactory.getLogger(classOf[UnifiedProfileProcessor])
-        httpClient = HttpClients.createDefault()
-        hdfsFileSystem = org.apache.hadoop.fs.FileSystem.get(new org.apache.hadoop.conf.Configuration())
+        // 1. Get the global job parameters object.
+        val globalParams = getRuntimeContext.getExecutionConfig.getGlobalJobParameters
+
+        // 2. Convert the parameters to a standard Java Map.
+        val paramMap = globalParams.toMap
+
+        // 3. Get the value from the map and wrap the potentially null result in an Option.
+        val hdfsPath: Option[String] = Option(paramMap.get("HDFS_FEATURE_CACHE_PATH"))
+        if (hdfsPath.isDefined) {
+            val hadoopConf = new org.apache.hadoop.conf.Configuration()
+            // Set the default filesystem to the HDFS namenode URI
+            hadoopConf.set("fs.defaultFS", hdfsPath.get)
+            // Set additional properties to handle DNS resolution within Docker
+            hadoopConf.set("dfs.client.use.datanode.hostname", "true")
+            hadoopConf.set("dfs.datanode.use.datanode.hostname", "true")
+
+            // Initialize the FileSystem object with the correct configuration
+            hdfsFileSystem = org.apache.hadoop.fs.FileSystem.get(new java.net.URI(hdfsPath.get), hadoopConf)
+            logger.info(s"HDFS FileSystem initialized for URI: ${hdfsFileSystem.getUri}")
+        } else {
+            logger.error("HDFS_FEATURE_CACHE_PATH is not defined in job parameters. HDFS will not work.")
+        }
     }
 
     override def close(): Unit = {
-        if (httpClient != null) httpClient.close()
         // HDFS FileSystem is managed by Hadoop's FileSystem cache, no need for explicit close here.
     }
 
@@ -292,14 +312,24 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
     private def processSeerEncounter(profile: PlayerProfile, eventPayload: java.util.Map[String, AnyRef], ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context): Unit = {
         logger.info(s"Seer encounter triggered for run_id: ${ctx.getCurrentKey}. Processing...")
 
+        // Get the encounterId from the event payload
+        val encounterId = Try(eventPayload.get("encounter_id").toString).getOrElse(java.util.UUID.randomUUID().toString)
+
         val avgHp = if (profile.hpHistory.isEmpty) 1.0 else profile.hpHistory.sum / profile.hpHistory.size
         val featureVector = FeatureVector(
-            run_id = profile.runId, total_dashes = profile.totalDashes, total_damage_dealt = profile.totalDamageDealt,
-            total_damage_taken = profile.totalDamageTaken, damage_taken_from_elites = profile.damageTakenFromElites,
-            avg_hp_percent = avgHp, upgrade_counts = profile.upgradeCounts,
-            outcome = -1, weight = 1.0
+            run_id = profile.runId,
+            encounterId = encounterId,
+            total_dashes = profile.totalDashes,
+            total_damage_dealt = profile.totalDamageDealt,
+            total_damage_taken = profile.totalDamageTaken,
+            damage_taken_from_elites = profile.damageTakenFromElites,
+            avg_hp_percent = avgHp,
+            upgrade_counts = profile.upgradeCounts,
+            outcome = -1,
+            weight = 1.0
         )
         val featureJson = gson.toJson(featureVector)
+
 
         // 1. Emit to the 'bqml_features' topic via the Seer side output
         ctx.output(seerTag, featureJson)
@@ -317,19 +347,6 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
                 logger.info(s"Cached feature vector to HDFS: $path")
             case Failure(e) =>
                 logger.error(s"Failed to write to HDFS cache at $path", e)
-        }
-
-        // 3. Trigger Python orchestrator via HTTP
-        val encounterId = Try(eventPayload.get("encounter_id").toString).getOrElse(java.util.UUID.randomUUID().toString)
-        val postRequest = new HttpPost(orchestratorUrl)
-        postRequest.setHeader("Content-Type", "application/json")
-        postRequest.setEntity(new StringEntity(s"""{"run_id": "${profile.runId}", "encounterId": "$encounterId"}"""))
-        Try(httpClient.execute(postRequest)) match {
-            case Success(response) =>
-                logger.info(s"Triggered seer-orchestrator for run_id ${profile.runId}. Response: ${response.getStatusLine.getStatusCode}")
-                response.close()
-            case Failure(e) =>
-                logger.error(s"Failed to trigger seer-orchestrator for run_id ${profile.runId}", e)
         }
     }
 }

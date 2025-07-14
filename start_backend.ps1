@@ -152,8 +152,8 @@ if (-not $topicCreationSuccess) {
 }
 
 Write-Host "--- Creating HDFS directories for Kafka Connect ---"
-docker exec namenode hdfs dfs -mkdir -p /topics /logs
-docker exec namenode hdfs dfs -chmod -R 777 /topics /logs
+docker exec namenode hdfs dfs -mkdir -p /topics /logs /feature_store/live /training_data
+docker exec namenode hdfs dfs -chmod -R 777 /topics /logs /feature_store /training_data
 Write-Host "HDFS directories created and permissions set."
 
 Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
@@ -203,9 +203,7 @@ docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `
     --master spark://spark-master:7077 `
     --deploy-mode client `
     --conf "spark.driver.extraJavaOptions=-Dlog4j.configuration=file:/opt/bitnami/spark/conf/log4j.properties" `
-    /tmp/AdaptiveSurvivorsSparkJobs.jar `
-    --gcp-project-id=$env:GCP_PROJECT_ID `
-    --gcs-temp-bucket=$env:GCS_TEMP_BUCKET
+    /tmp/AdaptiveSurvivorsSparkJobs.jar
 
 Write-Host "--- Backend Services Setup Complete ---"
 Write-Host "You can now run your Unity game and perform actions."

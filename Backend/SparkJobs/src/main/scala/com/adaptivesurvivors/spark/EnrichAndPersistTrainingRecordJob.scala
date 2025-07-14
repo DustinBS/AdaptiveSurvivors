@@ -117,13 +117,13 @@ object EnrichAndPersistTrainingRecordJob {
     }.toMap
 
     // --- Configuration Parameters ---
-    val kafkaBootstrapServers = params.getOrElse("--kafka-brokers", "kafka:9092")
-    val sourceTopic = params.getOrElse("--source-topic", "gameplay_events")
-    val hdfsFeatureCachePath = params.getOrElse("--feature-cache-path", "hdfs://namenode:9000/feature_store/live")
-    val hdfsDataLakePath = params.getOrElse("--data-lake-path", "hdfs://namenode:9000/training_data")
-    val gcpProjectId = params.get("--gcp-project-id")
-    val bqDataset = params.getOrElse("--bq-dataset", "seer_training_workspace")
-    val gcsTempBucket = params.get("--gcs-temp-bucket")
+    val kafkaBootstrapServers = sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    val sourceTopic = sys.env.getOrElse("KAFKA_GAMEPLAY_EVENTS_TOPIC", "gameplay_events") // KAFKA_GAMEPLAY_EVENTS_TOPIC not yet setup, but this is fine
+    val hdfsFeatureCachePath = sys.env.getOrElse("HDFS_FEATURE_CACHE_PATH", "hdfs://namenode:9000/feature_store/live")
+    val hdfsDataLakePath = sys.env.getOrElse("HDFS_DATA_LAKE_PATH", "hdfs://namenode:9000/training_data")
+    val gcpProjectId = sys.env.get("GCP_PROJECT_ID")
+    val bqDataset = sys.env.getOrElse("SPARK_BQ_DATASET", "seer_training_workspace")
+    val gcsTempBucket = sys.env.get("GCS_TEMP_BUCKET")
 
     logger.info("--- Initializing Spark Session for Post-Run Enrichment ---")
     val spark = SparkSession.builder()

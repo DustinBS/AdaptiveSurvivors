@@ -1,0 +1,110 @@
+# Backend/PythonWorkers/seer_orchestrator/config.yml
+# Seer Orchestrator Configuration
+# This file is mounted into the Docker container and can be changed without rebuilding the image.
+
+# --- Scaling ---
+# Controls how dramatically bargain strength increases with prediction confidence.
+# A higher value means more significant buffs/debuffs at high confidence.
+confidence_scaling_factor: 1.5
+
+# --- Mappings ---
+# Associates BQML feature names with potential bargain effects.
+# Used to generate mechanically relevant buffs and debuffs based on player performance.
+feature_to_bargain_map:
+  total_dashes:
+    buffs:
+      - { targetStat: "DashCooldown", modifier: -0.15, isPercentage: True, duration: 180 }
+      - { targetStat: "MoveSpeed", modifier: 0.10, isPercentage: True, duration: 180 }
+    debuffs:
+      - { targetStat: "DashCooldown", modifier: 0.20, isPercentage: True, duration: 180 }
+      - { targetStat: "MoveSpeed", modifier: -0.10, isPercentage: True, duration: 180 }
+  total_damage_dealt:
+    buffs:
+      - { targetStat: "AttackDamage", modifier: 0.15, isPercentage: True, duration: 180 }
+    debuffs:
+      - { targetStat: "AttackDamage", modifier: -0.20, isPercentage: True, duration: 180 }
+  total_damage_taken:
+    buffs:
+      - { targetStat: "MaxHealth", modifier: 0.25, isPercentage: True, duration: 180 }
+      - { targetStat: "Armor", modifier: 20, isPercentage: False, duration: 180 }
+    debuffs:
+      - { targetStat: "MaxHealth", modifier: -0.20, isPercentage: True, duration: 180 }
+      - { targetStat: "Armor", modifier: -15, isPercentage: False, duration: 180 }
+  damage_taken_from_elites:
+    buffs:
+      - { targetStat: "Armor", modifier: 30, isPercentage: False, duration: 180 }
+    debuffs:
+      - { targetStat: "AttackSpeed", modifier: -0.15, isPercentage: True, duration: 180 }
+  avg_hp_percent:
+    buffs:
+      - { targetStat: "MaxHealth", modifier: 0.20, isPercentage: True, duration: 180 }
+    debuffs:
+      - { targetStat: "MoveSpeed", modifier: -0.15, isPercentage: True, duration: 180 }
+  # Example for handling specific upgrades from the 'upgrade_counts' feature map
+  "upgrade_counts.sword":
+    buffs:
+      - { targetStat: "AttackDamage", modifier: 0.10, isPercentage: True, duration: 180 }
+    debuffs:
+      - { targetStat: "AttackSpeed", modifier: -0.10, isPercentage: True, duration: 180 }
+  "upgrade_counts.boots":
+    buffs:
+      - { targetStat: "MoveSpeed", modifier: 0.10, isPercentage: True, duration: 180 }
+    debuffs:
+      - { targetStat: "DashCooldown", modifier: 0.10, isPercentage: True, duration: 180 }
+  # A fallback for any unmapped feature
+  default:
+    buffs:
+      - { targetStat: "AttackSpeed", modifier: 0.10, isPercentage: True, duration: 180 }
+    debuffs:
+      - { targetStat: "Armor", modifier: -10, isPercentage: False, duration: 180 }
+
+# --- Prompts ---
+# Jinja2-like templates for generating Gemini prompts.
+prompts:
+  win: |
+    You are a cryptic, all-knowing Seer. A player is about to face a boss. An oracle has predicted they will WIN.
+    The primary reason for this prediction is their performance related to: '{primary_feature}'.
+    The secondary reason is: '{secondary_feature}'.
+
+    Generate a JSON object with two keys: "dialogue" and "bargain_descriptions".
+    - "dialogue": A short, 2-sentence prophecy that sounds confident and hints at why they will win, based on the primary feature. It must lead into offering a challenge.
+    - "bargain_descriptions": A list of two strings. The first string should describe a challenge (a debuff) related to the primary feature. The second string should describe a challenge related to the secondary feature.
+  loss: |
+    You are a cryptic, all-knowing Seer. A player is about to face a boss. An oracle has predicted they will LOSE.
+    The primary reason for this prediction is their performance related to: '{primary_feature}'.
+    The secondary reason is: '{secondary_feature}'.
+
+    Generate a JSON object with two keys: "dialogue" and "bargain_descriptions".
+    - "dialogue": A short, 2-sentence prophecy that sounds ominous and hints at why they will lose, based on the primary feature. It must lead into offering a boon.
+    - "bargain_descriptions": A list of two strings. The first string should describe a helpful boon (a buff) related to the primary feature. The second string should describe a boon related to the secondary feature.
+
+# --- Fallbacks ---
+# Fallback choices used when the BQML or Gemini pipeline fails.
+fallback_choices:
+  buffs:
+    - { description: "A sliver of fortitude. (+20% Max HP)", buffs: [{ targetStat: "MaxHealth", modifier: 0.20, isPercentage: True, duration: 180 }], debuffs: [] }
+    - { description: "A fleeting burst of speed. (+10% Move Speed)", buffs: [{ targetStat: "MoveSpeed", modifier: 0.10, isPercentage: True, duration: 180 }], debuffs: [] }
+    - { description: "A moment of clarity. (-15% Dash Cooldown)", buffs: [{ targetStat: "DashCooldown", modifier: -0.15, isPercentage: True, duration: 180 }], debuffs: [] }
+    - { description: "A surge of inner power. (+10% Attack Damage)", buffs: [{ targetStat: "AttackDamage", modifier: 0.10, isPercentage: True, duration: 180 }], debuffs: [] }
+  debuffs:
+    - { description: "A true test of skill. (-15% Attack Damage)", buffs: [], debuffs: [{ targetStat: "AttackDamage", modifier: -0.15, isPercentage: True, duration: 180 }] }
+    - { description: "An unexpected burden. (+20% Dash Cooldown)", buffs: [], debuffs: [{ targetStat: "DashCooldown", modifier: 0.20, isPercentage: True, duration: 180 }] }
+    - { description: "A heavy heart. (-15% Move Speed)", buffs: [], debuffs: [{ targetStat: "MoveSpeed", modifier: -0.15, isPercentage: True, duration: 180 }] }
+    - { description: "A crack in your defenses. (-15 Armor)", buffs: [], debuffs: [{ targetStat: "Armor", modifier: -15, isPercentage: False, duration: 180 }] }
+
+# --- Application Settings ---
+app_settings:
+  # The specific Gemini model to use for generating dialogue.
+  gemini_model: "gemini-1.5-flash"
+  # The default boss archetype to use if not otherwise specified.
+  default_boss_archetype: "melee"
+  # Default BigQuery dataset if the BIGQUERY_DATASET environment variable is not set.
+  bigquery_default_dataset: "seer_training_workspace"
+  # Kafka topic names used by the service.
+  kafka_topics:
+    # Topic to consume feature vectors from.
+    consumer_topic: "bqml_features"
+    # Topic to produce seer results to.
+    producer_topic: "seer_results"
+    # Consumer group ID to ensure messages are processed once across all instances.
+    consumer_group_id: "seer-orchestrator-group"

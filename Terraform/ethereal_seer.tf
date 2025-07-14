@@ -1,5 +1,8 @@
 # Terraform/ethereal_seer.tf
 # This file contains the GCP configuration for the Ethereal Seer feature.
+# I think
+# terraform apply -target=google_storage_bucket.spark_temp_bucket -target=google_bigquery_dataset.staging_dataset
+# can create this independently of the post-run commentary feature.
 
 # 1. GCS Bucket for Spark temporary data and the HDFS data lake sink.
 resource "google_storage_bucket" "spark_temp_bucket" {

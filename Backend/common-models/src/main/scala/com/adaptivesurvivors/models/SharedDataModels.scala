@@ -7,6 +7,7 @@ package com.adaptivesurvivors.models
  * The Python orchestrator and BigQuery tables will be manually mirrored from this definition.
  *
  * @param run_id The unique ID for the run.
+ * @param encounterId The unique ID for the current Seer encounter.
  * @param total_dashes Count of dash events.
  * @param total_damage_dealt Total damage inflicted by the player.
  * @param total_damage_taken Total damage received by the player.
@@ -18,6 +19,7 @@ package com.adaptivesurvivors.models
  */
 case class FeatureVector(
   run_id: String,
+  encounterId: String,
   total_dashes: Long = 0L,
   total_damage_dealt: Double = 0.0,
   total_damage_taken: Double = 0.0,

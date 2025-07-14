@@ -38,3 +38,5 @@ Terraform/variables.tf
 
 # GCP service account credentials
 gcp-credentials/
+
+scripts/
