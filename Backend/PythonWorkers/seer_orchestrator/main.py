@@ -31,6 +31,7 @@ def load_config() -> Dict[str, Any]:
         exit(1)
 
 CONFIG = load_config()
+APP_SETTINGS = CONFIG.get('app_settings', {})
 
 # --- Environment Variable & Client Initialization ---
 
@@ -45,7 +46,7 @@ def get_env_var(key: str) -> str:
 KAFKA_BROKERS = get_env_var("KAFKA_BROKERS")
 GEMINI_API_KEY = get_env_var("GEMINI_API_KEY")
 GCP_PROJECT_ID = get_env_var("GCP_PROJECT_ID")
-BIGQUERY_DATASET = os.environ.get("BIGQUERY_DATASET", "seer_training_workspace")
+BIGQUERY_DATASET = os.environ.get("BIGQUERY_DATASET", APP_SETTINGS.get("bigquery_default_dataset", "seer_training_workspace"))
 
 # Initialize clients
 app = Flask(__name__)
@@ -55,7 +56,7 @@ producer = KafkaProducer(
     retries=5
 )
 genai.configure(api_key=GEMINI_API_KEY)
-llm_model = genai.GenerativeModel('gemini-1.5-flash')
+llm_model = genai.GenerativeModel(APP_SETTINGS.get("gemini_model", "gemini-1.5-flash"))
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)
 
 # --- Helper Functions ---
@@ -141,7 +142,8 @@ def process_seer_pipeline(features: dict):
     # Default to fallback, override on success
     dialogue, choices = generate_fallback_response()
 
-    pipeline_result = run_bqml_pipeline(features, boss_archetype="melee")
+    boss_archetype = APP_SETTINGS.get("default_boss_archetype", "melee")
+    pipeline_result = run_bqml_pipeline(features, boss_archetype=boss_archetype)
     if pipeline_result:
         is_buff = pipeline_result["prediction"] == "Loss"
         prompt_type = "loss" if is_buff else "win"
@@ -192,22 +194,28 @@ def process_seer_pipeline(features: dict):
         "payload": json.dumps(seer_result_payload)
     }
 
-    producer.send("seer_results", value=final_envelope)
+    producer_topic = APP_SETTINGS.get("kafka_topics", {}).get("producer_topic", "seer_results")
+    producer.send(producer_topic, value=final_envelope)
     producer.flush()
     logging.info(f"Successfully produced Seer result envelope to Kafka for run_id: {run_id}")
 
 def start_kafka_consumer():
     """Initializes and runs the Kafka Consumer loop."""
     logging.info("Consumer thread started. Initializing Kafka Consumer...")
+
+    kafka_topics = APP_SETTINGS.get("kafka_topics", {})
+    consumer_topic = kafka_topics.get("consumer_topic", "bqml_features")
+    group_id = kafka_topics.get("consumer_group_id", "seer-orchestrator-group")
+
     try:
         consumer = KafkaConsumer(
-            'bqml_features',
+            consumer_topic,
             bootstrap_servers=KAFKA_BROKERS,
-            group_id='seer-orchestrator-group',
+            group_id=group_id,
             auto_offset_reset='earliest',
             value_deserializer=lambda m: json.loads(m.decode('utf-8'))
         )
-        logging.info("Kafka Consumer initialized successfully. Waiting for messages...")
+        logging.info(f"Kafka Consumer initialized successfully on topic '{consumer_topic}'. Waiting for messages...")
         for message in consumer:
             if isinstance(message.value, dict):
                 process_seer_pipeline(message.value)
