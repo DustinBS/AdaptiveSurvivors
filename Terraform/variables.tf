@@ -3,26 +3,21 @@
 variable "gcp_project_id" {
   description = "The GCP Project ID."
   type        = string
-  default     = "your-gcp-project-id" # Replace with your actual GCP project ID
 }
 
 variable "gcp_region" {
   description = "The GCP region for resources."
   type        = string
-  default     = "your-gcp-region" # Replace with your desired GCP region
 }
 
 variable "service_account_name" {
   description = "The name of the service account."
   type        = string
-  default     = "your-service-account-name" # Replace with your desired service account name
 }
 
-# name will be "gcp_project_idgcs_bucket_name_suffix"
 variable "gcs_bucket_name_suffix" {
   description = "The suffix for the GCS bucket name used for Spark jobs."
   type        = string
-  default     = "your-gcs-bucket-suffix" # Replace with your desired GCS bucket suffix (just a temp bucket for Spark)
 }
 
 variable "gemini_api_key" {

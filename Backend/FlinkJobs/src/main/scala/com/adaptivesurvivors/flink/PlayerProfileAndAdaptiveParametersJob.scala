@@ -18,7 +18,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
 import scala.math.sqrt
-import scala.util.{Try, Success, Failure}
+import scala.util.{Failure, Success, Try}
 
 // --- Data Models for internal logic and Kafka payloads ---
 
@@ -78,7 +78,7 @@ class JsonToGameplayEventMapper extends RichMapFunction[String, GameplayEvent] {
 /**
  * This Flink job is the central real-time engine for Adaptive Survivors. It consumes all gameplay events and:
  * 1. Continuously generates adaptation parameters for enemies (Brute, Vexer) and sends them to the 'adaptive_params' topic.
- * 2. On-demand, when triggered by a 'seer_encounter_begin' event, calculates a full player feature vector and sends it
+ * 2. Emits full player feature vector when triggered by a 'seer_encounter_begin' or 'elite_fight_completed event, and sends it
  * to the 'bqml_features' topic, caches it in HDFS, and triggers the Python ML orchestrator.
  */
 object PlayerProfileAndAdaptiveParametersJob {
@@ -93,17 +93,13 @@ object PlayerProfileAndAdaptiveParametersJob {
   def main(args: Array[String]): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
 
-    // --- Configuration from Environment Variables ---
     val kafkaBootstrapServers = sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-    val orchestratorUrl = sys.env.getOrElse("SEER_ORCHESTRATOR_URL", "http://seer-orchestrator:5001/trigger")
     val hdfsFeatureCachePath = sys.env.getOrElse("HDFS_FEATURE_CACHE_PATH", "hdfs://namenode:9000/feature_store/live")
 
-    // Pass HDFS path to the job configuration
     val globalJobParams = new Configuration()
     globalJobParams.setString("HDFS_FEATURE_CACHE_PATH", hdfsFeatureCachePath)
     env.getConfig.setGlobalJobParameters(globalJobParams)
 
-    // --- Kafka Source ---
     val kafkaSource = KafkaSource.builder[String]()
       .setBootstrapServers(kafkaBootstrapServers)
       .setTopics("gameplay_events")
@@ -114,17 +110,15 @@ object PlayerProfileAndAdaptiveParametersJob {
 
     val rawEventStream = env.fromSource(kafkaSource, WatermarkStrategy.noWatermarks(), "Gameplay Events Kafka Source")
 
-    // --- Main Processing Logic ---
     val processedStream = rawEventStream
       .map(new JsonToGameplayEventMapper())
       .filter(_.event_type != "invalid_event")
       .keyBy(_.run_id) // Key by run_id for per-run state
-      .process(new UnifiedProfileProcessor(orchestratorUrl, hdfsFeatureCachePath, adaptiveParamsOutputTag, seerFeaturesOutputTag))
+      .process(new UnifiedProfileProcessor(hdfsFeatureCachePath, adaptiveParamsOutputTag, seerFeaturesOutputTag))
 
     // --- Kafka Sinks for Each Output Type ---
     val adaptiveParamsSink = createKafkaSink("adaptive_params", kafkaBootstrapServers)
     val seerFeaturesSink = createKafkaSink("bqml_features", kafkaBootstrapServers)
-
     // Route the side output stream to the adaptive params sink
     processedStream.getSideOutput(adaptiveParamsOutputTag).sinkTo(adaptiveParamsSink).name("Adaptive Params Kafka Sink")
 
@@ -147,7 +141,7 @@ object PlayerProfileAndAdaptiveParametersJob {
   }
 }
 
-class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, adaptiveTag: OutputTag[String], seerTag: OutputTag[String])
+class UnifiedProfileProcessor(hdfsCachePath: String, adaptiveTag: OutputTag[String], seerTag: OutputTag[String])
   extends KeyedProcessFunction[String, GameplayEvent, Unit] {
 
     @transient private var profileState: ValueState[PlayerProfile] = _
@@ -156,82 +150,74 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
     @transient private var hdfsFileSystem: org.apache.hadoop.fs.FileSystem = _
 
     override def open(parameters: Configuration): Unit = {
-        val descriptor = new ValueStateDescriptor("unified-player-profile", classOf[PlayerProfile])
-        profileState = getRuntimeContext.getState(descriptor)
-        gson = new GsonBuilder().create()
-        logger = LoggerFactory.getLogger(classOf[UnifiedProfileProcessor])
-        // 1. Get the global job parameters object.
-        val globalParams = getRuntimeContext.getExecutionConfig.getGlobalJobParameters
+      val descriptor = new ValueStateDescriptor("unified-player-profile", classOf[PlayerProfile])
+      profileState = getRuntimeContext.getState(descriptor)
+      gson = new GsonBuilder().create()
+      logger = LoggerFactory.getLogger(classOf[UnifiedProfileProcessor])
 
-        // 2. Convert the parameters to a standard Java Map.
-        val paramMap = globalParams.toMap
-
-        // 3. Get the value from the map and wrap the potentially null result in an Option.
-        val hdfsPath: Option[String] = Option(paramMap.get("HDFS_FEATURE_CACHE_PATH"))
-        if (hdfsPath.isDefined) {
-            val hadoopConf = new org.apache.hadoop.conf.Configuration()
-            // Set the default filesystem to the HDFS namenode URI
-            hadoopConf.set("fs.defaultFS", hdfsPath.get)
-            // Set additional properties to handle DNS resolution within Docker
-            hadoopConf.set("dfs.client.use.datanode.hostname", "true")
-            hadoopConf.set("dfs.datanode.use.datanode.hostname", "true")
-
-            // Initialize the FileSystem object with the correct configuration
-            hdfsFileSystem = org.apache.hadoop.fs.FileSystem.get(new java.net.URI(hdfsPath.get), hadoopConf)
-            logger.info(s"HDFS FileSystem initialized for URI: ${hdfsFileSystem.getUri}")
-        } else {
-            logger.error("HDFS_FEATURE_CACHE_PATH is not defined in job parameters. HDFS will not work.")
-        }
-    }
-
-    override def close(): Unit = {
-        // HDFS FileSystem is managed by Hadoop's FileSystem cache, no need for explicit close here.
+      val hadoopConf = new org.apache.hadoop.conf.Configuration()
+      hadoopConf.set("fs.defaultFS", hdfsCachePath)
+      hadoopConf.set("dfs.client.use.datanode.hostname", "true")
+      hadoopConf.set("dfs.datanode.use.datanode.hostname", "true")
+      hdfsFileSystem = org.apache.hadoop.fs.FileSystem.get(new java.net.URI(hdfsCachePath), hadoopConf)
+      logger.info(s"HDFS FileSystem initialized for URI: ${hdfsFileSystem.getUri}")
     }
 
   override def processElement(event: GameplayEvent, ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context, out: Collector[Unit]): Unit = {
       val profile = Option(profileState.value()).getOrElse(new PlayerProfile(event.player_id, event.run_id))
 
-        // --- Unified State Update Logic ---
-        event.event_type match {
-            case "player_movement_event" =>
-              val dirPayload = event.payload.get("dir").asInstanceOf[java.util.Map[String, Double]]
-              profile.lastPlayerVelocity = PredictionVector(dirPayload.get("dx").toFloat, dirPayload.get("dy").toFloat)
-
-            case "player_dash_event" =>
-                profile.totalDashes += 1 // For Seer
-                updateVexerPrediction(profile, event.payload, ctx) // For Vexer
-
-            case "enemy_death_event" =>
-                updateBruteAdaptation(profile, event.payload, ctx) // For Brute
-
-            case "player_damage_dealt_event" =>
-                val damage = Try(event.payload.get("dmg_amount").toString.toDouble).getOrElse(0.0)
-                profile.totalDamageDealt += damage
-
-            case "damage_taken_event" =>
-                val damage = Try(event.payload.get("dmg_amount").toString.toDouble).getOrElse(0.0)
-                profile.totalDamageTaken += damage
-                if (Try(event.payload.get("is_elite_source").toString.toBoolean).getOrElse(false)) {
-                    profile.damageTakenFromElites += damage
-                }
-
-            case "player_status_event" =>
-                val hp = Try(event.payload.get("hp").toString.toDouble).getOrElse(1.0)
-                val maxHp = Try(event.payload.get("max_hp").toString.toDouble).getOrElse(1.0)
-                if (maxHp > 0) profile.hpHistory = (hp / maxHp :: profile.hpHistory).take(100)
-
-            case "upgrade_choice" =>
-                val id = Try(event.payload.get("chosen_upgrade_id").toString).getOrElse("unknown")
-                profile.upgradeCounts = profile.upgradeCounts.updated(id, profile.upgradeCounts.getOrElse(id, 0) + 1)
-
-            case "seer_encounter_begin" =>
-                processSeerEncounter(profile, event.payload, ctx)
-
-            case _ => // Ignore other events
+      val isFeatureTriggerEvent = event.event_type == "seer_encounter_begin" || event.event_type == "elite_fight_completed"
+      if (isFeatureTriggerEvent) {
+        val archetype = Try(event.payload.get("boss_archetype").toString.toLowerCase).getOrElse("none")
+        if (archetype == "none") {
+          logger.warn(s"Ignoring event '${event.event_type}' with 'none' archetype for run_id: ${ctx.getCurrentKey}")
+          return // Stop processing this specific event
         }
-        profile.lastUpdated = System.currentTimeMillis()
-        profileState.update(profile)
-    }
+      }
+
+      event.event_type match {
+          case "player_movement_event" =>
+            val dirPayload = event.payload.get("dir").asInstanceOf[java.util.Map[String, Double]]
+            profile.lastPlayerVelocity = PredictionVector(dirPayload.get("dx").toFloat, dirPayload.get("dy").toFloat)
+
+          case "player_dash_event" =>
+              profile.totalDashes += 1 // For Seer
+              updateVexerPrediction(profile, event.payload, ctx) // For Vexer
+
+          case "enemy_death_event" =>
+              updateBruteAdaptation(profile, event.payload, ctx) // For Brute
+
+          case "player_damage_dealt_event" =>
+              val damage = Try(event.payload.get("dmg_amount").toString.toDouble).getOrElse(0.0)
+              profile.totalDamageDealt += damage
+
+          case "damage_taken_event" =>
+              val damage = Try(event.payload.get("dmg_amount").toString.toDouble).getOrElse(0.0)
+              profile.totalDamageTaken += damage
+              if (Try(event.payload.get("is_elite_source").toString.toBoolean).getOrElse(false)) {
+                  profile.damageTakenFromElites += damage
+              }
+
+          case "player_status_event" =>
+              val hp = Try(event.payload.get("hp").toString.toDouble).getOrElse(1.0)
+              val maxHp = Try(event.payload.get("max_hp").toString.toDouble).getOrElse(1.0)
+              if (maxHp > 0) profile.hpHistory = (hp / maxHp :: profile.hpHistory).take(100)
+
+          case "upgrade_choice" =>
+              val id = Try(event.payload.get("chosen_upgrade_id").toString).getOrElse("unknown")
+              profile.upgradeCounts = profile.upgradeCounts.updated(id, profile.upgradeCounts.getOrElse(id, 0) + 1)
+
+          case "seer_encounter_begin" =>
+              processFeatureVectorSnapshot(profile, event.payload, "boss", ctx)
+
+          case "elite_fight_completed" =>
+              processFeatureVectorSnapshot(profile, event.payload, "elite", ctx)
+
+          case _ => // Ignore other events
+      }
+    profile.lastUpdated = System.currentTimeMillis()
+    profileState.update(profile)
+  }
 
     override def onTimer(ts: Long, ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#OnTimerContext, out: Collector[Unit]): Unit = {
       val profile = profileState.value()
@@ -309,13 +295,12 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
       profile.activeStaleTimer = newTimer
     }
 
-    private def processSeerEncounter(profile: PlayerProfile, eventPayload: java.util.Map[String, AnyRef], ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context): Unit = {
-        logger.info(s"Seer encounter triggered for run_id: ${ctx.getCurrentKey}. Processing...")
+    private def processFeatureVectorSnapshot(profile: PlayerProfile, eventPayload: java.util.Map[String, AnyRef], fightType: String, ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context): Unit = {
+      logger.info(s"Feature vector snapshot triggered by '$fightType' for run_id: ${ctx.getCurrentKey}. Processing...")
 
-        // Get the encounterId from the event payload
         val encounterId = Try(eventPayload.get("encounter_id").toString).getOrElse(java.util.UUID.randomUUID().toString)
-
         val avgHp = if (profile.hpHistory.isEmpty) 1.0 else profile.hpHistory.sum / profile.hpHistory.size
+
         val featureVector = FeatureVector(
             run_id = profile.runId,
             encounterId = encounterId,
@@ -325,8 +310,8 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
             damage_taken_from_elites = profile.damageTakenFromElites,
             avg_hp_percent = avgHp,
             upgrade_counts = profile.upgradeCounts,
-            outcome = -1,
-            weight = 1.0
+            outcome = -1, // Placeholder: Ground truth is set by the post-run Spark Job
+            weight = 1.0  // Placeholder: Definitive weight is set by the post-run Spark Job
         )
         val featureJson = gson.toJson(featureVector)
 
@@ -343,10 +328,9 @@ class UnifiedProfileProcessor(orchestratorUrl: String, hdfsCachePath: String, ad
             outStream.close()
             logger.info(s"Cached feature vector to HDFS: $path")
         } match {
-            case Success(_) =>
-                logger.info(s"Cached feature vector to HDFS: $path")
-            case Failure(e) =>
-                logger.error(s"Failed to write to HDFS cache at $path", e)
+            case Failure(e) => logger.error(s"Failed to write to HDFS cache at $path", e)
+            case Success(_) => // Already logged
         }
     }
+
 }

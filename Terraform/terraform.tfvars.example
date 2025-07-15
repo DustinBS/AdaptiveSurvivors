@@ -1,0 +1,7 @@
+# Terraform/terraform.tfvars.example
+gemini_api_key           = "YOUR_GEMINI_API_KEY_HERE"
+gcp_project_id           = "YOUR_GCP_PROJECT_ID_HERE"
+gcp_region               = "YOUR_GCP_REGION_HERE"
+service_account_name     = "YOUR_SERVICE_ACCOUNT_NAME_HERE"
+gcs_bucket_name_suffix   = "YOUR_GCS_BUCKET_SUFFIX_HERE"
+# bucket name will be "gcp_project_idgcs_bucket_name_suffix" (just a temp bucket for Spark)
