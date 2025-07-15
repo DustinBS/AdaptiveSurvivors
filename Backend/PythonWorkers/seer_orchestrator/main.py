@@ -171,7 +171,13 @@ def run_bqml_pipeline(features: dict, boss_archetype: str) -> Dict[str, Any] | N
 
     # 1. Train model (or re-train if it exists)
     # Uses Logistic Regression model suitable for binary classification (win/loss)
-    sql_train = f"CREATE OR REPLACE MODEL `{model_uri}` OPTIONS(model_type='LOGISTIC_REG', input_label_cols=['outcome'], enable_global_explain=TRUE) AS SELECT * FROM `{table_uri}` WHERE outcome IS NOT NULL;"
+    sql_train = f"""
+        CREATE OR REPLACE MODEL `{model_uri}`
+        OPTIONS(model_type='LOGISTIC_REG', input_label_cols=['outcome'], enable_global_explain=TRUE) AS
+        SELECT * EXCEPT(upgrade_counts)
+        FROM `{table_uri}`
+        WHERE outcome IS NOT NULL;
+    """
     try:
         bq_client.query(sql_train).result()
         logging.info(f"Successfully trained BQML model: {model_name}")

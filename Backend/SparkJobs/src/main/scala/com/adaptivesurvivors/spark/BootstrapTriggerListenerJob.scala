@@ -103,8 +103,10 @@ object BootstrapTriggerListenerJob {
   def runBootstrap(spark: SparkSession, hdfsPath: String, projectId: String, dataset: String, tempBucket: String, logger: Logger): Unit = {
     logger.info(s"Reading historical training data from: $hdfsPath")
 
-    // Read historical data if the path exists. Partition discovery adds the 'boss_archetype' column.
-    val historicalDF = Try(spark.read.json(hdfsPath)).getOrElse(spark.emptyDataFrame)
+    // Provide the explicit schema when reading the JSON data
+    val historicalDF = Try(spark.read.schema(trainingTableSchema).json(hdfsPath))
+        .getOrElse(spark.emptyDataFrame)
+
     historicalDF.cache()
 
     logger.info(s"Loaded ${historicalDF.count()} historical records. Hydrating BigQuery tables.")

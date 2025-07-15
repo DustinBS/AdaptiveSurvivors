@@ -54,8 +54,12 @@ object EnrichAndPersistTrainingRecordJob {
       val featurePaths = runIds.map(id => s"$hdfsFeatureCachePath/run_id=$id/features.json")
 
       logger.info(s"Found ${runIds.length} boss fights in batch. Reading features from HDFS.")
-      // Read all feature files for this batch into a single DataFrame.
-      val cachedFeaturesDF = spark.read.json(featurePaths: _*).as[FeatureVector]
+
+      // Define the schema based on your case class
+      val featureSchema = spark.implicits.newProductEncoder[FeatureVector].schema
+
+      // Read the JSON files using the explicit schema, then convert to a Dataset
+      val cachedFeaturesDF = spark.read.schema(featureSchema).json(featurePaths: _*).as[FeatureVector]
 
       // --- 2. Enrich Features with Outcome ---
       val enrichedDF = batchDF
