@@ -4,15 +4,12 @@
 # 1. Enable APIs.
 resource "google_project_service" "cloudfunctions_api" {
   service            = "cloudfunctions.googleapis.com"
-  disable_on_destroy = false
 }
 resource "google_project_service" "cloudbuild_api" {
   service            = "cloudbuild.googleapis.com"
-  disable_on_destroy = false
 }
 resource "google_project_service" "run_api" {
   service            = "run.googleapis.com"
-  disable_on_destroy = false
 }
 
 # 2. Create a GCS bucket to store the function's source code.

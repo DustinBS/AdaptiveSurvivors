@@ -60,6 +60,11 @@ resource "local_file" "service_account_key_file" {
 
 module "ethereal_seer" {
   source = "./modules/ethereal_seer"
+  count = 1 # 0 to disable; 1 to enable
+  depends_on = [
+    google_project_service.bigquery,
+    google_project_service.gcs
+  ]
 
   gcp_project_id         = var.gcp_project_id
   gcp_region             = var.gcp_region
@@ -69,6 +74,10 @@ module "ethereal_seer" {
 
 module "post_run_commentary" {
   source = "./modules/post_run_commentary"
+  count = 0 # 0 to disable; 1 to enable
+  depends_on = [
+    google_project_service.gcs
+  ]
 
   gcp_project_id = var.gcp_project_id
   gcp_region     = var.gcp_region
