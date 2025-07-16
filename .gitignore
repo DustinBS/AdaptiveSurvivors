@@ -20,6 +20,10 @@ Backend/FlinkJobs/dependency-reduced-pom.xml
 Backend/SparkJobs/target/
 Backend/SparkJobs/dependency-reduced-pom.xml
 
+# Scalafmt Formatting
+# Metals and Bloop specific files
+.metals/
+.bloop/
 
 # IDE-specific ignores
 .idea/

@@ -56,17 +56,17 @@ if ($sw.Elapsed -ge $timeout) {
 
 Write-Host "--- Submitting Kafka Connect HDFS Sink Connector Configuration ---"
 try {
-    try { Invoke-RestMethod -Uri http://localhost:8083/connectors/hdfs-sink-combined-events -Method Delete } catch {}; Invoke-RestMethod -Uri http://localhost:8083/connectors -Method Post -ContentType 'Application/json' -Body (Get-Content -Raw -Path ./Backend/KafkaConnect/connectors/hdfs-sink-gameplay-events.json)
+    # Attempt to delete the connector first (in case it exists from a previous run), then create it.
+    try { Invoke-RestMethod -Uri http://localhost:8083/connectors/hdfs-sink-combined-events -Method Delete } catch {}
+    Invoke-RestMethod -Uri http://localhost:8083/connectors -Method Post -ContentType 'Application/json' -Body (Get-Content -Raw -Path ./Backend/KafkaConnect/connectors/hdfs-sink-gameplay-events.json)
+    Write-Host "HDFS Sink connector submitted."
 } catch {
-    # This error is expected if the connector already exists, so we just log it as a warning
-    Write-Warning "Connector hdfs-sink-gameplay-events might already exist or there was another issue: $($_.Exception.Message)"
+    Write-Error "Failed to create or update connector hdfs-sink-combined-events: $($_.Exception.Message)"
 }
 
 Write-Host "--- Creating HDFS directories for Kafka Connect ---"
-docker exec namenode hdfs dfs -mkdir -p /topics
-docker exec namenode hdfs dfs -mkdir -p /logs
-docker exec namenode hdfs dfs -chmod 777 /topics
-docker exec namenode hdfs dfs -chmod 777 /logs
+docker exec namenode hdfs dfs -mkdir -p /topics /logs /feature_store/live /training_data /apps/spark
+docker exec namenode hdfs dfs -chmod -R 777 /topics /logs /feature_store /training_data /apps/spark
 
 Write-Host "HDFS directories created and permissions set."
 Write-Host "--- HDFS Data Reset Complete ---"
