@@ -1,7 +1,6 @@
 // Backend/FlinkJobs/src/main/scala/com/adaptivesurvivors/flink/PlayerProfileAndAdaptiveParametersJob.scala
 package com.adaptivesurvivors.flink
 
-import com.adaptivesurvivors.models.FeatureVector
 import com.google.gson.{Gson, GsonBuilder}
 import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichMapFunction
@@ -21,7 +20,6 @@ import scala.math.sqrt
 import scala.util.{Failure, Success, Try}
 
 // --- Data Models for internal logic and Kafka payloads ---
-
 // Represents the raw incoming event from Kafka
 case class GameplayEvent(event_type: String, timestamp: Long, player_id: String, run_id: String, payload: java.util.Map[String, AnyRef])
 
