@@ -51,7 +51,19 @@ resource "google_service_account_key" "sa_key" {
 }
 
 # 5. Save the generated key to the local filesystem
+# Cleanup block:
+# running `docker compose` before `terraform apply` creates an empty directory as it attempts to mount nothing.
+resource "null_resource" "gcp_creds_cleanup" {
+  provisioner "local-exec" {
+    # Uses `Remove-Item` for powershell. For Mac, replace with `rm rf` and interpreter `["/bin/sh", "-c"]`
+    command = "if (Test-Path -Path '${path.module}/../gcp-credentials' -PathType Container) { Remove-Item -Recurse -Force '${path.module}/../gcp-credentials' }"
+    interpreter = ["PowerShell", "-Command"]
+  }
+}
 resource "local_file" "service_account_key_file" {
+  depends_on = [
+    null_resource.gcp_creds_cleanup
+  ]
   content  = base64decode(google_service_account_key.sa_key.private_key)
   filename = "${path.module}/../gcp-credentials/service-account-key.json"
 }
