@@ -138,7 +138,7 @@ while (-not $topicCreationSuccess -and $attempts -lt $maxTopicAttempts) {
         Write-Host "Attempting to create Kafka topics (Attempt $($attempts + 1)/$maxTopicAttempts)..."
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic gameplay_events --partitions 1 --replication-factor 1 --if-not-exists
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic adaptive_params --partitions 1 --replication-factor 1 --if-not-exists
-        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic bqml_features --partitions 1 --replication-factor 1 --if-not-exists
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_triggers --partitions 1 --replication-factor 1 --if-not-exists
         docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --topic seer_results --partitions 1 --replication-factor 1 --if-not-exists
         Write-Host "Kafka topics created successfully."
         $topicCreationSuccess = $true
@@ -184,13 +184,15 @@ docker exec jobmanager flink run -d /tmp/AdaptiveSurvivorsFlinkJobs.jar
 Write-Host "Flink job submitted."
 
 Write-Host "--- Submitting Spark Jobs and Configs to Spark Master ---"
-# 1. Copy the JAR and log4j.properties into HDFS namenode container
+# 1. Copy the JAR, log4j.properties, and seed_data.yml into HDFS namenode container
 docker cp .\Backend\SparkJobs\target\spark-batch-jobs-1.0-SNAPSHOT.jar namenode:/tmp/AdaptiveSurvivorsSparkJobs.jar
 docker cp .\Backend\SparkJobs\src\main\resources\log4j.properties namenode:/tmp/log4j.properties
+docker cp .\Backend\SparkJobs\src\main\resources\config\seed_data.yml namenode:/tmp/seed_data.yml
 
 # 2. From the namenode container, copy into HDFS, making it cluster-accessible
 docker exec namenode hdfs dfs -put -f /tmp/AdaptiveSurvivorsSparkJobs.jar /apps/spark/AdaptiveSurvivorsSparkJobs.jar
 docker exec namenode hdfs dfs -put -f /tmp/log4j.properties /apps/spark/log4j.properties
+docker exec namenode hdfs dfs -put -f /tmp/seed_data.yml /apps/spark/seed_data.yml
 
 Write-Host "--- Launching Spark Streaming Job: BootstrapTriggerListenerJob ---"
 docker exec -d spark-master /opt/bitnami/spark/bin/spark-submit `

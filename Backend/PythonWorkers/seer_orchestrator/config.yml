@@ -51,16 +51,16 @@ feature_to_bargain_map:
     debuffs:
       - { targetStat: "MoveSpeed", modifier: -0.15, isPercentage: True, duration: 180 }
   # Example for handling specific upgrades from the 'upgrade_counts' feature map
-  "upgrade_counts.sword":
-    buffs:
-      - { targetStat: "AttackDamage", modifier: 0.10, isPercentage: True, duration: 180 }
-    debuffs:
-      - { targetStat: "AttackSpeed", modifier: -0.10, isPercentage: True, duration: 180 }
-  "upgrade_counts.boots":
-    buffs:
-      - { targetStat: "MoveSpeed", modifier: 0.10, isPercentage: True, duration: 180 }
-    debuffs:
-      - { targetStat: "DashCooldown", modifier: 0.10, isPercentage: True, duration: 180 }
+  # "upgrade_counts.sword":
+  #   buffs:
+  #     - { targetStat: "AttackDamage", modifier: 0.10, isPercentage: True, duration: 180 }
+  #   debuffs:
+  #     - { targetStat: "AttackSpeed", modifier: -0.10, isPercentage: True, duration: 180 }
+  # "upgrade_counts.boots":
+  #   buffs:
+  #     - { targetStat: "MoveSpeed", modifier: 0.10, isPercentage: True, duration: 180 }
+  #   debuffs:
+  #     - { targetStat: "DashCooldown", modifier: 0.10, isPercentage: True, duration: 180 }
   # A fallback for any unmapped feature
   default:
     buffs:
@@ -117,8 +117,8 @@ app_settings:
     # is required for these specific Kafka consumer settings to take effect,
     # as the consumer client is initialized once with these values.
   kafka_topics:
-    # Topic to consume feature vectors from.
-    consumer_topic: "bqml_features"
+    # Topic to consume seer NPC prophetic bargain triggers from.
+    consumer_topic: "seer_triggers"
     # Topic to produce seer results to.
     producer_topic: "seer_results"
     # Consumer group ID to ensure messages are processed once across all instances.

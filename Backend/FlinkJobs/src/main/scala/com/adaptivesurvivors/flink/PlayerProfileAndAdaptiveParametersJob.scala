@@ -48,13 +48,16 @@ case class PlayerProfile(
   var currentBruteForm: String = "skirmisher",
   var activeStaleTimer: Long = 0L,
   var stalenessOverrideUntil: Long = 0L,
-  var lastUpdated: Long = System.currentTimeMillis())
+  var lastUpdated: Long = System.currentTimeMillis(),
+  var recentDashDirections: List[String] = List.empty,
+  var vexerPredictionTimer: Long = 0L)
 
 // Payloads for messages sent to the 'adaptive_params' topic
 case class AdaptiveMessageEnvelope(message_type: String, payload: String)
 case class FormAdaptationPayload(playerId: String, adaptation_type: String)
 case class VexerPredictionPayload(playerId: String, predicted_direction: PredictionVector)
 case class PredictionVector(dx: Float, dy: Float)
+case class SeerTriggerPayload(run_id: String, encounter_id: String, boss_archetype: String)
 
 /**
  * Deserializes JSON strings into GameplayEvent objects with robust error handling.
@@ -98,7 +101,8 @@ object PlayerProfileAndAdaptiveParametersJob {
 
   // Define OutputTags for Flink's Side Output feature
   val adaptiveParamsOutputTag: OutputTag[String] = OutputTag[String]("adaptive-params")
-  val seerFeaturesOutputTag: OutputTag[String] = OutputTag[String]("seer-features")
+  val seerTriggersOutputTag: OutputTag[String] = OutputTag[String]("seer-triggers")
+  val vexerPredictionOutputTag: OutputTag[String] = OutputTag[String]("vexer-prediction-updates")
 
   def main(args: Array[String]): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -133,11 +137,14 @@ object PlayerProfileAndAdaptiveParametersJob {
         new UnifiedProfileProcessor(
           hdfsFeatureCachePath,
           adaptiveParamsOutputTag,
-          seerFeaturesOutputTag))
+          seerTriggersOutputTag,
+          vexerPredictionOutputTag))
 
     // --- Kafka Sinks for Each Output Type ---
     val adaptiveParamsSink = createKafkaSink("adaptive_params", kafkaBootstrapServers)
-    val seerFeaturesSink = createKafkaSink("bqml_features", kafkaBootstrapServers)
+    val seerTriggersSink = createKafkaSink("seer_triggers", kafkaBootstrapServers)
+    val vexerPredictionSink = createKafkaSink("vexer_prediction_updates", kafkaBootstrapServers)
+
     // Route the side output stream to the adaptive params sink
     processedStream
       .getSideOutput(adaptiveParamsOutputTag)
@@ -146,9 +153,14 @@ object PlayerProfileAndAdaptiveParametersJob {
 
     // Route the main output stream to the seer features sink
     processedStream
-      .getSideOutput(seerFeaturesOutputTag)
-      .sinkTo(seerFeaturesSink)
-      .name("Seer Features Kafka Sink")
+      .getSideOutput(seerTriggersOutputTag)
+      .sinkTo(seerTriggersSink)
+      .name("Seer Triggers Kafka Sink")
+
+    processedStream
+      .getSideOutput(vexerPredictionOutputTag)
+      .sinkTo(vexerPredictionSink)
+      .name("Vexer Prediction Kafka Sink")
 
     env.execute("Unified Player Profile & Feature Job")
   }
@@ -169,7 +181,8 @@ object PlayerProfileAndAdaptiveParametersJob {
 class UnifiedProfileProcessor(
   hdfsCachePath: String,
   adaptiveTag: OutputTag[String],
-  seerTag: OutputTag[String])
+  seerTriggersTag: OutputTag[String],
+  vexerPredictionTag: OutputTag[String])
     extends KeyedProcessFunction[String, GameplayEvent, Unit] {
 
   @transient private var profileState: ValueState[PlayerProfile] = _
@@ -219,8 +232,27 @@ class UnifiedProfileProcessor(
 
       case "player_dash_event" =>
         profile.totalDashes += 1 // For Seer
-        updateVexerPrediction(profile, event.payload, ctx) // For Vexer
+        // --- For Vexer ---
+        // Just record the dash, don't predict immediately.
+        val dirPayload =
+          event.payload.get("direction").asInstanceOf[java.util.Map[String, Double]]
+        val dx = dirPayload.get("dx")
+        val dy = dirPayload.get("dy")
+        val direction =
+          if (Math.abs(dx) > Math.abs(dy)) if (dx > 0) "right" else "left"
+          else if (dy > 0) "up"
+          else "down"
 
+        profile.recentDashDirections =
+          (direction :: profile.recentDashDirections).take(10) // Keep last 10
+
+        // If no timer is active, set one to start the broadcast loop.
+        if (profile.vexerPredictionTimer == 0L) {
+          val newTimer = ctx.timerService().currentProcessingTime() + 2000 // Fire in 2 seconds
+          ctx.timerService().registerProcessingTimeTimer(newTimer)
+          profile.vexerPredictionTimer = newTimer
+        }
+      // --- End of Vexer ---
       case "enemy_death_event" =>
         updateBruteAdaptation(profile, event.payload, ctx) // For Brute
 
@@ -246,9 +278,22 @@ class UnifiedProfileProcessor(
           profile.upgradeCounts.updated(id, profile.upgradeCounts.getOrElse(id, 0) + 1)
 
       case "seer_encounter_begin" =>
+        // cache the feature vector to HDFS. This is guaranteed to run first to prevent race conditions.
         processFeatureVectorSnapshot(profile, event.payload, "boss", ctx)
 
+        // create and send the lightweight trigger.
+        val encounterId =
+          Try(event.payload.get("encounter_id").toString).getOrElse("unknown_encounter")
+        val bossArchetype =
+          Try(event.payload.get("boss_archetype").toString).getOrElse("unknown_archetype")
+        val triggerPayload = SeerTriggerPayload(profile.runId, encounterId, bossArchetype)
+
+        // Emit the trigger to the new side output.
+        ctx.output(seerTriggersTag, gson.toJson(triggerPayload))
+        logger.info(s"Emitted seer_encounter_begin trigger for run_id: ${ctx.getCurrentKey}")
+
       case "elite_fight_completed" =>
+        // caches the feature vector to HDFS for the Spark job.
         processFeatureVectorSnapshot(profile, event.payload, "elite", ctx)
 
       case _ => // Ignore other events
@@ -262,7 +307,37 @@ class UnifiedProfileProcessor(
     ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#OnTimerContext,
     out: Collector[Unit]): Unit = {
     val profile = profileState.value()
-    if (profile != null && ts == profile.activeStaleTimer) {
+    if (profile == null) return
+
+    // Handle the Vexer broadcast timer.
+    if (ts == profile.vexerPredictionTimer) {
+      if (profile.recentDashDirections.nonEmpty) {
+        // Find the most frequent dash direction from the recent history.
+        val newPrediction = profile.recentDashDirections.groupBy(identity).maxBy(_._2.size)._1
+
+        // Only broadcast if the prediction has changed to avoid spam.
+        if (newPrediction != profile.lastVexerPrediction) {
+          profile.lastVexerPrediction = newPrediction
+          val vec = newPrediction match {
+            case "up" => PredictionVector(0, 1); case "down" => PredictionVector(0, -1)
+            case "left" => PredictionVector(-1, 0); case "right" => PredictionVector(1, 0)
+            case _ => PredictionVector(0, 0)
+          }
+          val vexerPayload = VexerPredictionPayload(profile.playerId, vec)
+          val envelope =
+            AdaptiveMessageEnvelope("vexer_prediction_update", gson.toJson(vexerPayload))
+          ctx.output(vexerPredictionTag, gson.toJson(envelope))
+        }
+      }
+      // Re-register the timer to create the continuous broadcast loop.
+      val newTimer = ctx.timerService().currentProcessingTime() + 2000 // Fire again in 2s
+      ctx.timerService().registerProcessingTimeTimer(newTimer)
+      profile.vexerPredictionTimer = newTimer
+      profileState.update(profile)
+    }
+
+    // Handle the Brute staleness timer.
+    if (ts == profile.activeStaleTimer) {
       logger.info(s"Brute staleness timer fired for run_id: ${ctx.getCurrentKey}")
       val newForm = if (profile.currentBruteForm == "juggernaut") "skirmisher" else "juggernaut"
       profile.stalenessOverrideUntil = ctx
@@ -273,38 +348,6 @@ class UnifiedProfileProcessor(
   }
 
   // --- Helper Methods for Each Feature ---
-
-  private def updateVexerPrediction(
-    profile: PlayerProfile,
-    payload: java.util.Map[String, AnyRef],
-    ctx: KeyedProcessFunction[String, GameplayEvent, Unit]#Context): Unit = {
-    val dirPayload = payload.get("direction").asInstanceOf[java.util.Map[String, Double]]
-    val dx = dirPayload.get("dx")
-    val dy = dirPayload.get("dy")
-    val direction =
-      if (Math.abs(dx) > Math.abs(dy)) if (dx > 0) "right" else "left"
-      else if (dy > 0) "up"
-      else "down"
-
-    val newCount = profile.dashDirectionCounts.getOrElse(direction, 0) + 1
-    profile.dashDirectionCounts = profile.dashDirectionCounts.updated(direction, newCount)
-
-    if (profile.dashDirectionCounts.nonEmpty) {
-      val newPrediction = profile.dashDirectionCounts.maxBy(_._2)._1
-      if (newPrediction != profile.lastVexerPrediction) {
-        profile.lastVexerPrediction = newPrediction
-        val vec = newPrediction match {
-          case "up" => PredictionVector(0, 1); case "down" => PredictionVector(0, -1)
-          case "left" => PredictionVector(-1, 0); case "right" => PredictionVector(1, 0)
-        }
-        val vexerPayload = VexerPredictionPayload(profile.playerId, vec)
-        val envelope =
-          AdaptiveMessageEnvelope("vexer_prediction_update", gson.toJson(vexerPayload))
-        ctx.output(adaptiveTag, gson.toJson(envelope))
-      }
-    }
-  }
-
   private def updateBruteAdaptation(
     profile: PlayerProfile,
     payload: java.util.Map[String, AnyRef],
@@ -383,11 +426,7 @@ class UnifiedProfileProcessor(
     )
     val featureJson = gson.toJson(featureVector)
 
-    // 1. Emit to the 'bqml_features' topic via the Seer side output
-    ctx.output(seerTag, featureJson)
-    logger.info(s"Emitted feature vector to Seer topic for run_id: ${ctx.getCurrentKey}")
-
-    // 2. Cache to HDFS, overwriting previous versions for this run
+    // Cache to HDFS, overwriting previous versions for this run
     val path =
       new org.apache.hadoop.fs.Path(s"$hdfsCachePath/run_id=${profile.runId}/features.json")
     Try {

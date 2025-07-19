@@ -20,6 +20,7 @@ object EnrichAndPersistTrainingRecordJob {
   // Configurable constants for ML training weights, as requested.
   val BOSS_FIGHT_WEIGHT: Double = 1.0
   val ELITE_FIGHT_WEIGHT: Double = 0.1
+  val BOSS_FIGHT_DUPLICATION_FACTOR: Int = 10 // Boss fights are 10x more important
 
   // Schema for the incoming boss/elite fight completion events.
   val fightCompletionEventSchema: StructType = StructType(
@@ -33,12 +34,12 @@ object EnrichAndPersistTrainingRecordJob {
    * boss fight outcome events with their corresponding run features.
    */
   def processBatch(
-      spark: SparkSession,
-      hdfsFeatureCachePath: String,
-      hdfsDataLakePath: String,
-      gcpProjectId: Option[String],
-      bqDataset: String,
-      gcsTempBucket: Option[String])(batchDF: Dataset[Row], batchId: Long): Unit = {
+    spark: SparkSession,
+    hdfsFeatureCachePath: String,
+    hdfsDataLakePath: String,
+    gcpProjectId: Option[String],
+    bqDataset: String,
+    gcsTempBucket: Option[String])(batchDF: Dataset[Row], batchId: Long): Unit = {
     import spark.implicits._
     val logger = Logger.getLogger(this.getClass.getName)
     val isDryRun = gcpProjectId.isEmpty || gcsTempBucket.isEmpty
@@ -90,19 +91,30 @@ object EnrichAndPersistTrainingRecordJob {
     logger.info(s"Successfully enriched ${enrichedDF.count()} records.")
 
     if (!isDryRun) {
-      // --- 3a. Sink to BigQuery for ML ---
+      // --- 3a. Oversample and Sink to BigQuery for ML ---
       // Sink ALL enriched records (bosses and elites) to BigQuery for in-session model training.
-      val archetypesInBatch = enrichedDF.select("boss_archetype").distinct().as[String].collect()
+      val eliteRecordsDF = enrichedDF.filter(col("event_type") =!= "boss_fight_completed")
+      val bossRecordsDF = enrichedDF.filter(col("event_type") === "boss_fight_completed")
+
+      // Create N-1 copies of the boss records to achieve the desired weight
+      val duplicatedBossRecordsDF = (1 until BOSS_FIGHT_DUPLICATION_FACTOR)
+        .map(_ => bossRecordsDF)
+        .reduceOption(_ union _)
+        .getOrElse(spark.emptyDataFrame)
+
+      val oversampledEnrichedDF =
+        eliteRecordsDF.unionByName(bossRecordsDF).unionByName(duplicatedBossRecordsDF)
       logger.info(
-        s"Appending all ${enrichedDF.count()} enriched records to BigQuery for BQML training.")
+        s"After oversampling, total records for BQML training: ${oversampledEnrichedDF.count()}")
+
+      val archetypesInBatch =
+        oversampledEnrichedDF.select("boss_archetype").distinct().as[String].collect()
 
       archetypesInBatch.foreach { archetype =>
         val bqTable = s"${gcpProjectId.get}:$bqDataset.${archetype}_training_data"
+        val filteredForArchetypeDF =
+          oversampledEnrichedDF.filter(col("boss_archetype") === archetype)
 
-        // Filter the source DataFrame for the current archetype
-        val filteredForArchetypeDF = enrichedDF.filter(col("boss_archetype") === archetype)
-
-        // Select ONLY the columns defined in the shared BQMLTrainingData schema
         val bqmlTrainingDF =
           filteredForArchetypeDF.select(BQMLTrainingDataSchema.fieldNames.map(col): _*)
 
@@ -151,7 +163,7 @@ object EnrichAndPersistTrainingRecordJob {
     // --- Configuration Parameters ---
     val kafkaBootstrapServers = sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     val sourceTopic = sys.env.getOrElse("KAFKA_GAMEPLAY_EVENTS_TOPIC", "gameplay_events")
-  val hdfsFeatureCachePath =
+    val hdfsFeatureCachePath =
       sys.env.getOrElse("HDFS_FEATURE_CACHE_PATH", "hdfs://namenode:9000/feature_store/live")
     val hdfsDataLakePath =
       sys.env.getOrElse("HDFS_DATA_LAKE_PATH", "hdfs://namenode:9000/training_data")

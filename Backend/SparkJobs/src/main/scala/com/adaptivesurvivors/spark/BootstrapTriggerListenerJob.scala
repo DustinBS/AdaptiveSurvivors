@@ -1,14 +1,12 @@
-// Backend/SparkJobs/src/main/scala/com/adaptivesurvivors/spark/BootstrapTriggerListenerJob.scala
 package com.adaptivesurvivors.spark
 
 import com.adaptivesurvivors.spark.TrainingSchemas.BQMLTrainingDataSchema
-import com.adaptivesurvivors.models.FeatureVector
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.sql.catalyst.ScalaReflection
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
+
 import scala.util.Try
 
 /**
@@ -21,11 +19,17 @@ object BootstrapTriggerListenerJob {
   // A flag to ensure the bootstrap logic runs only once per application lifetime.
   @volatile private var bootstrapTriggered = false
 
+  // The number of times boss fight records will be duplicated to increase their training weight.
+  val BOSS_FIGHT_DUPLICATION_FACTOR: Int = 10
+
+  // The schema for the incoming event that triggers the bootstrap process.
   val playSessionEventSchema: StructType = StructType(
     Seq(StructField("event_type", StringType, nullable = true)))
 
   /**
-   * The core bootstrap logic.
+   * The core bootstrap logic. It performs an idempotent, one-time seeding of the HDFS data lake
+   * with handcrafted data, then reads all historical data, applies oversampling to weight
+   * important records, and populates the BigQuery ML tables.
    */
   def runBootstrap(
     spark: SparkSession,
@@ -35,18 +39,73 @@ object BootstrapTriggerListenerJob {
     tempBucket: String,
     logger: Logger): Unit = {
     import spark.implicits._
+
+    // This schema includes partitioning/ID columns plus all fields from the BQML schema.
+    // It's used to read the raw data from HDFS before oversampling.
+    val hdfsSeedSchema = StructType(
+      Seq(
+        StructField("boss_archetype", StringType, false),
+        StructField("run_id", StringType, false),
+        StructField("encounterId", StringType, false),
+        StructField("weight", DoubleType, false)) ++ BQMLTrainingDataSchema.fields)
+
+    // --- Step 1: Idempotent Seeding ---
+    val markerPath = new org.apache.hadoop.fs.Path(s"$hdfsPath/_SEED_DATA_APPLIED")
+    val hdfs = markerPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
+
+    if (!hdfs.exists(markerPath)) {
+      logger.warn(
+        "Seed data marker not found. Performing one-time data seeding from hardcoded values.")
+
+      // Data is ordered to match the hdfsSeedSchema structure.
+      // Elite-like records get a weight of 0.1, while Boss-like records get 1.0.
+      val seedDataRows = Seq(
+        Row("melee", "seed_run_melee_loss", "seed_encounter", 0.1, 5L, 100.0, 150.0, 0.0, 0.3, Map[String, Int](), 0),
+        Row("melee", "seed_run_melee_win", "seed_encounter", 0.1, 20L, 500.0, 50.0, 0.0, 0.8, Map[String, Int](), 1),
+        Row("ranged", "seed_run_ranged_loss", "seed_encounter", 0.1, 10L, 200.0, 120.0, 0.0, 0.4, Map[String, Int](), 0),
+        Row("ranged", "seed_run_ranged_win", "seed_encounter", 0.1, 30L, 600.0, 40.0, 0.0, 0.9, Map[String, Int](), 1),
+        Row("final", "seed_run_final_loss", "seed_encounter", 1.0, 15L, 400.0, 200.0, 0.0, 0.2, Map[String, Int](), 0),
+        Row("final", "seed_run_final_win", "seed_encounter", 1.0, 40L, 1000.0, 100.0, 0.0, 0.7, Map[String, Int](), 1)
+      )
+
+      if (seedDataRows.nonEmpty) {
+        val seedDF =
+          spark.createDataFrame(spark.sparkContext.parallelize(seedDataRows), hdfsSeedSchema)
+
+        seedDF.write
+          .partitionBy("boss_archetype")
+          .mode(SaveMode.Append)
+          .json(hdfsPath)
+
+        hdfs.create(markerPath).close()
+        logger.info(
+          "Successfully seeded data lake from hardcoded values and created marker file.")
+      }
+
+    } else {
+      logger.info("Seed data marker found. Skipping seeding process.")
+    }
+
+    // --- Step 2: Main Bootstrap Logic (runs AFTER seeding is guaranteed) ---
     logger.info(s"Reading historical training data from: $hdfsPath")
-
-    // Derive the HDFS read schema from the FeatureVector case class to ensure consistency.
-    val hdfsSchema = ScalaReflection.schemaFor[FeatureVector].dataType.asInstanceOf[StructType]
-
-    // Read from HDFS. Spark will automatically detect the 'boss_archetype' partition column.
-    val historicalDF = Try(spark.read.schema(hdfsSchema).json(hdfsPath))
+    val historicalDF = Try(spark.read.schema(hdfsSeedSchema).json(hdfsPath))
       .getOrElse(spark.emptyDataFrame)
 
-    historicalDF.cache()
+    // Apply oversampling to give more weight to boss fights
+    val eliteRecordsDF = historicalDF.filter(col("weight") < 1.0)
+    val bossRecordsDF = historicalDF.filter(col("weight") >= 1.0)
 
-    logger.info(s"Loaded ${historicalDF.count()} historical records. Hydrating BigQuery tables.")
+    val duplicatedBossRecordsDF = (1 until BOSS_FIGHT_DUPLICATION_FACTOR)
+      .map(_ => bossRecordsDF)
+      .reduceOption(_ union _)
+      .getOrElse(spark.emptyDataFrame)
+
+    val oversampledHistoricalDF =
+      eliteRecordsDF.unionByName(bossRecordsDF).unionByName(duplicatedBossRecordsDF)
+    logger.info(
+      s"Loaded and oversampled ${oversampledHistoricalDF.count()} historical records for BigQuery hydration.")
+    oversampledHistoricalDF.cache()
+
     spark.conf.set("temporaryGcsBucket", tempBucket)
 
     val archetypeTables = Map(
@@ -56,27 +115,20 @@ object BootstrapTriggerListenerJob {
 
     archetypeTables.foreach { case (archetype, tableName) =>
       val bqTableId = s"$projectId:$dataset.$tableName"
-
-      // Filter by the partitioned 'boss_archetype' column
-      val archetypeDF =
-        if (historicalDF.isEmpty || !historicalDF.columns.contains("boss_archetype")) {
-          spark.emptyDataFrame
-        } else {
-          historicalDF.filter(col("boss_archetype") === archetype)
-        }
+      val archetypeDF = oversampledHistoricalDF.filter(col("boss_archetype") === archetype)
 
       if (!archetypeDF.isEmpty) {
-        // If we have data, THEN we select the columns for BQML.
+        // Select only the columns for the BQML model, excluding weight and identifiers
         val bqmlTrainingDF = archetypeDF.select(BQMLTrainingDataSchema.fieldNames.map(col): _*)
         logger.info(
           s"Writing ${bqmlTrainingDF.count()} records for '$archetype' to $bqTableId with SaveMode.Overwrite")
+
         bqmlTrainingDF.write
           .format("bigquery")
           .option("table", bqTableId)
-          .mode(SaveMode.Overwrite)
+          .mode(SaveMode.Overwrite)  // Overwrite ensures a clean slate on bootstrap
           .save()
       } else {
-        // If there's no data, we create an empty DataFrame WITH THE CORRECT SCHEMA.
         logger.warn(s"No historical data for '$archetype'. Creating empty table at $bqTableId.")
         val emptyDF =
           spark.createDataFrame(spark.sparkContext.emptyRDD[Row], BQMLTrainingDataSchema)
@@ -87,11 +139,11 @@ object BootstrapTriggerListenerJob {
           .save()
       }
     }
-    historicalDF.unpersist()
+    oversampledHistoricalDF.unpersist()
   }
 
   def main(args: Array[String]): Unit = {
-    val logger = Logger.getLogger(getClass.getName)
+    val logger = Logger.getLogger(this.getClass.getName)
     Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
 
     // --- Configuration Parameters ---

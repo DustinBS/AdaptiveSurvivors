@@ -204,6 +204,7 @@ services:
       SPARK_BQ_DATASET: ${SPARK_BQ_DATASET}
       GCS_TEMP_BUCKET: ${GCS_TEMP_BUCKET}
       SPARK_PUBLIC_DNS: localhost
+      spark.jars.packages: com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.20
     env_file:
       - ./.env
     volumes:
@@ -232,6 +233,7 @@ services:
       HADOOP_CONF_DIR: /opt/bitnami/spark/conf
       GOOGLE_APPLICATION_CREDENTIALS: /opt/gcp/service-account-key.json
       SPARK_PUBLIC_DNS: localhost
+      spark.jars.packages: com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.20
     env_file:
       - ./.env
     volumes:

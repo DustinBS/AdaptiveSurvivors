@@ -1,0 +1,47 @@
+# Backend/SparkJobs/src/main/resources/config/seed_data.yml
+# Handcrafted seed data to bootstrap the BQML models.
+# This ensures a balanced dataset is available from the first session,
+# preventing "1 unique label" errors during model training.
+
+seed_records:
+  - archetype: "melee"
+    outcome: false # Loss
+    total_dashes: 5
+    total_damage_dealt: 100.0
+    total_damage_taken: 150.0
+    avg_hp_percent: 0.3
+
+  - archetype: "melee"
+    outcome: true # Win
+    total_dashes: 20
+    total_damage_dealt: 500.0
+    total_damage_taken: 50.0
+    avg_hp_percent: 0.8
+
+  - archetype: "ranged"
+    outcome: false # Loss
+    total_dashes: 10
+    total_damage_dealt: 200.0
+    total_damage_taken: 120.0
+    avg_hp_percent: 0.4
+
+  - archetype: "ranged"
+    outcome: true # Win
+    total_dashes: 30
+    total_damage_dealt: 600.0
+    total_damage_taken: 40.0
+    avg_hp_percent: 0.9
+
+  - archetype: "final"
+    outcome: false # Loss
+    total_dashes: 15
+    total_damage_dealt: 400.0
+    total_damage_taken: 200.0
+    avg_hp_percent: 0.2
+
+  - archetype: "final"
+    outcome: true # Win
+    total_dashes: 40
+    total_damage_dealt: 1000.0
+    total_damage_taken: 100.0
+    avg_hp_percent: 0.7

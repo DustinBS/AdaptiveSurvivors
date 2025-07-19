@@ -5,12 +5,15 @@ import random
 import threading
 import math
 import yaml
+import time
 from typing import Dict, Any, List
 
+from hdfs import InsecureClient
 from flask import Flask, jsonify
 from kafka import KafkaProducer, KafkaConsumer
 import google.generativeai as genai
 from google.cloud import bigquery
+from google.cloud.exceptions import NotFound
 
 # --- Initial Setup & Configuration ---
 
@@ -148,85 +151,139 @@ def generate_fallback_response() -> tuple[str, list]:
     return dialogue, choices
 
 def run_bqml_pipeline(features: dict, boss_archetype: str) -> Dict[str, Any] | None:
-    """Executes the full BQML training and prediction pipeline.
-    Returns None if the BQML client is not available or if any step fails.
     """
-    # Guard Clause: Immediately return if BQML capabilities are disabled.
+    Executes the BQML pipeline by training a model, then uses ML.WEIGHTS to determine
+    the most impactful features for the seer's response.
+    """
     if not gcp_bq_available or not bq_client:
         logging.warning("BQML pipeline is disabled. Skipping.")
         return None
 
-    with config_lock:
-        bigquery_dataset = APP_SETTINGS.get("bigquery_default_dataset", "seer_training_workspace")
-    table_name = f"{boss_archetype}_training_data"
-    model_name = f"{boss_archetype}_seer_model"
-    model_uri = f"{bq_client.project}.{bigquery_dataset}.{model_name}"
-    table_uri = f"{bq_client.project}.{bigquery_dataset}.{table_name}"
+    # --- The retry logic for table creation is still valuable ---
+    max_retries = 3
+    retry_delay_seconds = 15
+    for attempt in range(max_retries):
+        try:
+            with config_lock:
+                bigquery_dataset = APP_SETTINGS.get("bigquery_default_dataset", "seer_training_workspace")
+            table_name = f"{boss_archetype}_training_data"
+            model_name = f"{boss_archetype}_seer_model"
+            model_uri = f"{bq_client.project}.{bigquery_dataset}.{model_name}"
+            table_uri = f"{bq_client.project}.{bigquery_dataset}.{table_name}"
 
-    sql_train = f"""
-        CREATE OR REPLACE MODEL `{model_uri}`
-        OPTIONS(model_type='LOGISTIC_REG', input_label_cols=['outcome'], enable_global_explain=TRUE) AS
-        SELECT * EXCEPT(upgrade_counts) FROM `{table_uri}` WHERE outcome IS NOT NULL;
-    """
-    try:
-        bq_client.query(sql_train).result()
-        logging.info(f"Successfully trained BQML model: {model_name}")
-    except Exception as e:
-        logging.error(f"BQML training failed for model {model_name}: {e}")
-        return None
+            # --- Step 1: Train the model with the mandatory TRANSFORM clause for feature scaling ---
+            sql_train = f"""
+                CREATE OR REPLACE MODEL `{model_uri}`
+                TRANSFORM(
+                    ML.STANDARD_SCALER(total_dashes) OVER() AS total_dashes,
+                    ML.STANDARD_SCALER(total_damage_dealt) OVER() AS total_damage_dealt,
+                    ML.STANDARD_SCALER(total_damage_taken) OVER() AS total_damage_taken,
+                    ML.STANDARD_SCALER(damage_taken_from_elites) OVER() AS damage_taken_from_elites,
+                    ML.STANDARD_SCALER(avg_hp_percent) OVER() AS avg_hp_percent,
+                    outcome
+                )
+                OPTIONS(
+                    model_type='LOGISTIC_REG',
+                    input_label_cols=['outcome'],
+                    max_iterations=10,
+                    early_stop=TRUE,
+                    min_rel_progress=0.01
+                ) AS
+                SELECT * EXCEPT(upgrade_counts)
+                FROM `{table_uri}`
+                WHERE outcome IS NOT NULL;
+            """
+            bq_client.query(sql_train).result()
+            logging.info(f"Successfully trained scaled BQML model: {model_name}")
 
-    feature_sql_parts = []
-    for k, v in features.items():
-        if k in ['run_id', 'encounterId', 'outcome', 'weight']: continue
-        if k == 'upgrade_counts' and isinstance(v, dict):
-            for up_k, up_v in v.items():
-                feature_sql_parts.append(f"{up_v} AS upgrade_counts_{up_k}")
-        else:
-             feature_sql_parts.append(f"{v} AS {k}")
+            # --- Step 2: Query the model's weights to find the most important features ---
+            sql_weights = f"SELECT processed_input, weight FROM ML.WEIGHTS(MODEL `{model_uri}`) WHERE processed_input != 'intercept'"
+            weights_results = list(bq_client.query(sql_weights).result())
 
-    if not feature_sql_parts:
-        logging.error("No valid features found for prediction after filtering.")
-        return None
+            if not weights_results:
+                logging.error("Could not retrieve model weights.")
+                return None
 
-    sql_predict = f"SELECT * FROM ML.EXPLAIN_PREDICT(MODEL `{model_uri}`, (SELECT {', '.join(feature_sql_parts)}))"
-    try:
-        results = list(bq_client.query(sql_predict).result())
-        if not results: return None
+            # Find the top two features by the absolute magnitude of their learned weight
+            sorted_weights = sorted(weights_results, key=lambda x: abs(x.weight), reverse=True)
 
-        row = results[0]
-        sorted_explanation = sorted(row.explanation, key=lambda x: abs(x.attribution), reverse=True)
-        top_features = [exp.feature for exp in sorted_explanation[:2]]
+            top_features = [row.processed_input for row in sorted_weights[:2]]
+            if len(top_features) < 2:
+                top_features.extend(['default'] * (2 - len(top_features)))
 
-        # Ensure at least two features are always present, using 'default' if not enough
-        if len(top_features) < 2:
-            top_features.extend(['default'] * (2 - len(top_features)))
+            # --- Step 3: Get the predicted outcome AND the probability (confidence) ---
+            feature_sql_parts = []
+            for k, v in features.items():
+                 if k in ['total_dashes', 'total_damage_dealt', 'total_damage_taken', 'damage_taken_from_elites', 'avg_hp_percent']:
+                    feature_sql_parts.append(f"{v} AS {k}")
 
-        return {
-            "prediction": "Win" if row.predicted_outcome == 1 else "Loss",
-            "confidence": row.predicted_outcome_probs[0].prob,
-            "primary_feature": top_features[0].replace("_", "."), # Format for LLM
-            "secondary_feature": top_features[1].replace("_", "."), # Format for LLM
-        }
-    except Exception as e:
-        logging.error(f"BQML prediction failed for model {model_name}: {e}")
-        return None
+            sql_predict_outcome = f"SELECT predicted_outcome, predicted_outcome_probs FROM ML.PREDICT(MODEL `{model_uri}`, (SELECT {', '.join(feature_sql_parts)}))"
+            prediction_result = list(bq_client.query(sql_predict_outcome).result())
+
+            if not prediction_result:
+                logging.error("Prediction query returned no results.")
+                return None
+
+            prediction_row = prediction_result[0]
+            predicted_outcome = prediction_row.predicted_outcome
+
+            confidence_score = 0.5  # Default confidence
+            for prob_struct in prediction_row.predicted_outcome_probs:
+                if prob_struct['label'] == predicted_outcome:
+                    confidence_score = prob_struct['prob']
+                    break
+
+            return {
+                "prediction": "Win" if predicted_outcome == 1 else "Loss",
+                "confidence": confidence_score,
+                "primary_feature": top_features[0],
+                "secondary_feature": top_features[1],
+            }
+
+        except NotFound:
+            logging.warning(f"BQML table not found (Attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay_seconds}s...")
+            time.sleep(retry_delay_seconds)
+            retry_delay_seconds *= 2
+
+        except Exception as e:
+            logging.error(f"An unexpected BQML error occurred: {e}", exc_info=True)
+            return None
+
+    logging.error("BQML pipeline failed after multiple retries.")
+    return None
 
 # --- Core Logic ---
 
-def process_seer_pipeline(features: dict):
-    """Orchestrates the seer encounter logic from feature processing to Kafka production."""
-    run_id = features.get("run_id")
-    encounter_id = features.get("encounterId")
+def process_seer_pipeline(trigger_payload: dict):
+    """Orchestrates the seer encounter logic, now triggered by a lightweight message."""
+    run_id = trigger_payload.get("run_id")
+    encounter_id = trigger_payload.get("encounter_id")
+    boss_archetype = trigger_payload.get("boss_archetype", "melee") # Use archetype from trigger
+
     if not run_id or not encounter_id:
-        logging.error(f"Message missing run_id or encounterId. Payload: {features}")
+        logging.error(f"Trigger message missing run_id or encounterId. Payload: {trigger_payload}")
         return
 
     logging.info(f"Processing pipeline for run_id: {run_id}, encounterId: {encounter_id}")
 
-    dialogue, choices = generate_fallback_response()
+    # --- Step 1: Pull Feature Vector from HDFS ---
+    try:
+        # NOTE: Assumes HDFS is accessible at 'namenode:9870' from the Docker network.
+        # This matches the port exposed in your docker-compose.yml for the namenode UI.
+        hdfs_client = InsecureClient('http://namenode:9870', user='root')
+        hdfs_path = f'/feature_store/live/run_id={run_id}/features.json'
 
-    with config_lock:
-        boss_archetype = APP_SETTINGS.get("default_boss_archetype", "melee")
+        with hdfs_client.read(hdfs_path) as reader:
+            features = json.load(reader)
+        logging.info(f"Successfully pulled feature vector {features} from HDFS for run_id: {run_id}")
+
+    except Exception as e:
+        logging.error(f"Failed to pull feature vector from HDFS for run_id {run_id}: {e}. Aborting pipeline.")
+        # Optionally, send a fallback response to Kafka here.
+        return
+
+
+    dialogue, choices = generate_fallback_response()
 
     pipeline_result = run_bqml_pipeline(features, boss_archetype=boss_archetype)
 
@@ -291,7 +348,7 @@ def start_kafka_consumer():
     logging.info("Consumer thread started. Initializing Kafka Consumer...")
     with config_lock:
         kafka_topics = APP_SETTINGS.get("kafka_topics", {})
-        consumer_topic = kafka_topics.get("consumer_topic", "bqml_features")
+        consumer_topic = kafka_topics.get("consumer_topic", "seer_triggers")
         group_id = kafka_topics.get("consumer_group_id", "seer-orchestrator-group")
     kafka_brokers = get_required_env_var("KAFKA_BROKERS")
 

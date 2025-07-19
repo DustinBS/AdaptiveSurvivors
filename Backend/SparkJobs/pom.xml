@@ -98,7 +98,12 @@
             <version>2.4.2</version>
             <scope>compile</scope>
         </dependency>
-
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client</artifactId>
+            <version>3.2.1</version> <!-- Use a version compatible with your Spark/HDFS setup -->
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 
     <build>
