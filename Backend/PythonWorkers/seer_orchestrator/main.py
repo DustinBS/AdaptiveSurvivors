@@ -7,6 +7,7 @@ import math
 import yaml
 import time
 from typing import Dict, Any, List
+import re
 
 from hdfs import InsecureClient
 from flask import Flask, jsonify
@@ -287,7 +288,6 @@ def process_seer_pipeline(trigger_payload: dict):
 
     pipeline_result = run_bqml_pipeline(features, boss_archetype=boss_archetype)
 
-    # Proceed with LLM only if BQML was successful AND the LLM is available.
     if pipeline_result and gcp_llm_available and llm_model:
         is_buff = pipeline_result["prediction"] == "Loss"
         prompt_type = "loss" if is_buff else "win"
@@ -296,21 +296,30 @@ def process_seer_pipeline(trigger_payload: dict):
             prompt_template = CONFIG['prompts'][prompt_type]
             bargain_map = CONFIG['feature_to_bargain_map']
 
-        # Format the prompt with the top features from BQML
         prompt = prompt_template.format(
             primary_feature=pipeline_result["primary_feature"].replace("_", " "),
             secondary_feature=pipeline_result["secondary_feature"].replace("_", " ")
         )
         try:
             response_text = llm_model.generate_content(prompt).text
-            llm_json = json.loads(response_text.strip("`").strip("json\n"))
+
+            logging.info(f"DEBUG: Raw response from Gemini API:\n---\n{response_text}\n---")
+
+            # Search for a JSON object within the response text
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+
+            if not json_match:
+                raise ValueError("No JSON object found in the Gemini API response.")
+
+            # Extract and parse only the matched JSON string
+            json_string = json_match.group(0)
+            llm_json = json.loads(json_string)
 
             dialogue = llm_json.get("dialogue", "The vision is complete.")
             descriptions = llm_json.get("bargain_descriptions", ["A choice.", "Another choice."])
 
             generated_choices = []
             for i, feature_name in enumerate([pipeline_result["primary_feature"], pipeline_result["secondary_feature"]]):
-                # Get bargain options from config based on feature, default if not specific
                 bargain_options = bargain_map.get(feature_name, bargain_map["default"])
                 effects_pool = bargain_options["buffs"] if is_buff else bargain_options["debuffs"]
                 base_effect = random.choice(effects_pool)
@@ -322,8 +331,14 @@ def process_seer_pipeline(trigger_payload: dict):
                     "debuffs": [scaled_effect] if not is_buff else []
                 })
             choices = generated_choices
-        except Exception as e:
+
+        except (ValueError, json.JSONDecodeError) as e:
+            # This will now catch both JSON parsing errors and the "No JSON object found" error
             logging.error(f"Gemini API call or JSON parsing failed: {e}. Using fallback dialogue/choices.")
+        except Exception as e:
+            # Catch any other unexpected errors
+            logging.error(f"An unexpected error occurred during the LLM pipeline: {e}. Using fallback dialogue/choices.", exc_info=True)
+
 
     seer_result_payload = {
         "playerId": features.get("player_id", "unknown"),
@@ -331,6 +346,7 @@ def process_seer_pipeline(trigger_payload: dict):
         "dialogue": dialogue,
         "choices": choices
     }
+
     final_envelope = {
         "message_type": "seer_result_update",
         "payload": json.dumps(seer_result_payload)
