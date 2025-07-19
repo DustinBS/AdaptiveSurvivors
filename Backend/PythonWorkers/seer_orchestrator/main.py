@@ -131,6 +131,36 @@ def load_and_reinitialize(initial_load: bool = False) -> tuple[bool, str]:
 
 # --- Helper Functions ---
 
+def format_effect_string(effect: dict) -> str:
+    """
+    Formats an effect dictionary into a human-readable string, e.g., (+20% Max HP).
+    """
+    # A mapping to make stat names more player-friendly
+    STAT_NAME_MAP = {
+        "DashCooldown": "Dash Cooldown",
+        "MoveSpeed": "Move Speed",
+        "AttackDamage": "Attack Damage",
+        "MaxHealth": "Max HP",
+        "Armor": "Armor",
+        "AttackSpeed": "Attack Speed"
+    }
+
+    modifier = effect.get("modifier", 0.0)
+    is_percentage = effect.get("isPercentage", False)
+    stat_name = STAT_NAME_MAP.get(effect.get("targetStat"), effect.get("targetStat", ""))
+
+    # Determine the sign
+    sign = "+" if modifier >= 0 else ""
+
+    # Format the value
+    if is_percentage:
+        value_str = f"{int(modifier * 100)}%"
+    else:
+        # Use int() to remove unnecessary .0 from whole numbers
+        value_str = str(int(modifier))
+
+    return f"({sign}{value_str} {stat_name})"
+
 def scale_modifier(base_modifier: float, confidence: float) -> float:
     """Scales a bargain's power based on the prediction confidence."""
     with config_lock:
@@ -153,14 +183,33 @@ def generate_fallback_response() -> tuple[str, list]:
 
 def run_bqml_pipeline(features: dict, boss_archetype: str) -> Dict[str, Any] | None:
     """
-    Executes the BQML pipeline by training a model, then uses ML.WEIGHTS to determine
-    the most impactful features for the seer's response.
+    Dynamically infers the feature list from the input data, then trains a model
+    and uses ML.WEIGHTS to determine feature importance.
     """
     if not gcp_bq_available or not bq_client:
         logging.warning("BQML pipeline is disabled. Skipping.")
         return None
 
-    # --- The retry logic for table creation is still valuable ---
+    # --- ✨ Define columns that are NOT features ---
+    # This is now the only list you need to manage in Python.
+    NON_FEATURE_COLS = [
+        'run_id',
+        'encounterId',
+        'player_id',
+        'outcome',
+        'weight',
+        'upgrade_counts'
+    ]
+
+    # --- ✨ Dynamically generate the feature list ---
+    # The feature list is inferred from the keys of the data read from HDFS.
+    numerical_features = [key for key in features.keys() if key not in NON_FEATURE_COLS]
+
+    if not numerical_features:
+        logging.error("Could not dynamically infer any numerical features from the input data.")
+        return None
+    logging.info(f"Dynamically inferred numerical features for model training: {numerical_features}")
+
     max_retries = 3
     retry_delay_seconds = 15
     for attempt in range(max_retries):
@@ -172,15 +221,14 @@ def run_bqml_pipeline(features: dict, boss_archetype: str) -> Dict[str, Any] | N
             model_uri = f"{bq_client.project}.{bigquery_dataset}.{model_name}"
             table_uri = f"{bq_client.project}.{bigquery_dataset}.{table_name}"
 
-            # --- Step 1: Train the model with the mandatory TRANSFORM clause for feature scaling ---
+            # --- Dynamically build the SQL clauses using the inferred feature list ---
+            transform_clauses = [f"ML.STANDARD_SCALER({feat}) OVER() AS {feat}" for feat in numerical_features]
+            select_features = ", ".join(numerical_features)
+
             sql_train = f"""
                 CREATE OR REPLACE MODEL `{model_uri}`
                 TRANSFORM(
-                    ML.STANDARD_SCALER(total_dashes) OVER() AS total_dashes,
-                    ML.STANDARD_SCALER(total_damage_dealt) OVER() AS total_damage_dealt,
-                    ML.STANDARD_SCALER(total_damage_taken) OVER() AS total_damage_taken,
-                    ML.STANDARD_SCALER(damage_taken_from_elites) OVER() AS damage_taken_from_elites,
-                    ML.STANDARD_SCALER(avg_hp_percent) OVER() AS avg_hp_percent,
+                    {', '.join(transform_clauses)},
                     outcome
                 )
                 OPTIONS(
@@ -190,12 +238,12 @@ def run_bqml_pipeline(features: dict, boss_archetype: str) -> Dict[str, Any] | N
                     early_stop=TRUE,
                     min_rel_progress=0.01
                 ) AS
-                SELECT * EXCEPT(upgrade_counts)
+                SELECT {select_features}, outcome
                 FROM `{table_uri}`
                 WHERE outcome IS NOT NULL;
             """
             bq_client.query(sql_train).result()
-            logging.info(f"Successfully trained scaled BQML model: {model_name}")
+            logging.info(f"Successfully trained scaled BQML model with dynamic features: {model_name}")
 
             # --- Step 2: Query the model's weights to find the most important features ---
             sql_weights = f"SELECT processed_input, weight FROM ML.WEIGHTS(MODEL `{model_uri}`) WHERE processed_input != 'intercept'"
@@ -214,9 +262,9 @@ def run_bqml_pipeline(features: dict, boss_archetype: str) -> Dict[str, Any] | N
 
             # --- Step 3: Get the predicted outcome AND the probability (confidence) ---
             feature_sql_parts = []
-            for k, v in features.items():
-                 if k in ['total_dashes', 'total_damage_dealt', 'total_damage_taken', 'damage_taken_from_elites', 'avg_hp_percent']:
-                    feature_sql_parts.append(f"{v} AS {k}")
+            for feat in numerical_features:
+                if feat in features:
+                    feature_sql_parts.append(f"{features[feat]} AS {feat}")
 
             sql_predict_outcome = f"SELECT predicted_outcome, predicted_outcome_probs FROM ML.PREDICT(MODEL `{model_uri}`, (SELECT {', '.join(feature_sql_parts)}))"
             prediction_result = list(bq_client.query(sql_predict_outcome).result())
@@ -325,8 +373,18 @@ def process_seer_pipeline(trigger_payload: dict):
                 base_effect = random.choice(effects_pool)
                 scaled_effect = base_effect.copy()
                 scaled_effect["modifier"] = scale_modifier(base_effect["modifier"], pipeline_result["confidence"])
+
+                # 1. Get the original LLM description
+                llm_description = descriptions[i] if i < len(descriptions) else f"Choice {i+1}"
+
+                # 2. Generate the programmatic effect string
+                effect_str = format_effect_string(scaled_effect)
+
+                # 3. Combine them for the final description
+                final_description = f"{llm_description} {effect_str}"
+
                 generated_choices.append({
-                    "description": descriptions[i] if i < len(descriptions) else f"Choice {i+1}",
+                    "description": final_description,
                     "buffs": [scaled_effect] if is_buff else [],
                     "debuffs": [scaled_effect] if not is_buff else []
                 })
