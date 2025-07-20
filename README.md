@@ -1,4 +1,4 @@
-# AdaptiveSurvivors
+# Adaptive Survivors
 
 An experimental survivors-like game built with Unity and cloud backend. The Apache data stack (Kafka, Spark, Flink) is deployed locally with Docker compose as a proof-of-concept, but it is built with a distributed flow in mind (i.e. resillience to higher latency). The idea is to enable tracking of player telemetry but offload potentially heavy processing of enemy behavior parameters to create the effect that the enemy is watching and adapting to the player (because they are) even when there are lots of enemies. No more major features are planned apart from visual or musical additions. Feel free to use the setup as a reference for your own project, though live-service games (like this would be in a real product) is very difficult to get right and be financially sustainable.   
 
