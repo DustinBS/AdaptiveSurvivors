@@ -1,6 +1,6 @@
 # AdaptiveSurvivors
 
-A multiplayer survival game built with Unity and cloud backend.
+A survivors-like experimental game built with Unity and cloud backend.
 
 ## Prerequisites (for development)
 
@@ -10,7 +10,7 @@ A multiplayer survival game built with Unity and cloud backend.
 - **Maven 3.9.10** - (for Flink, Scala) [Apache Maven downloads page](https://maven.apache.org/download.cgi)
 - **Node.js v22.13.0 LTS** (for Unity -> LLM generation of certain dialogue)
 - **Terraform (+ gcloud)** - (Optional for GCP, otherwise use [console.cloud.google.com](https://console.cloud.google.com))
-- **Powershell** (Optional for .ps1 setup scripts at root, you easily translate them to Bash)
+- **Powershell** (Optional for .ps1 backend setup scripts at root, you can easily translate them to Bash)
 - **Git**
 
 ## Planned Architecture
@@ -37,15 +37,22 @@ git clone --recurse-submodules https://github.com/DustinBS/AdaptiveSurvivors.git
 
 ### 2. Start Backend Services
 
+Set the .env variables and terraform.tfvars.example if you want to test the cloud features using terraform.
+
+Run `terraform apply` before `start_backend.ps1` because the service `seer-orchestartor` mounts the key.
+
 ```powershell
 # Start all services
-docker-compose up -d
+terraform -chdir="Terraform" init
+terraform -chdir="Terraform" apply
+start_backend.ps1
 
 # Verify services are running
-docker-compose ps
+docker compose ps
 ```
 
-After you provision GCP services, set the .env variables and run `generate-gcp-key.ps1` on project root to get your service account key to gcp-credentials/service-account-key.json for Spark.
+note: the `terraform` setup manages the lifecycle of the key, so this next step won't necessary if you are using it.
+After you provision GCP services, run `generate-gcp-key.ps1` on project root to get your service account key to gcp-credentials/service-account-key.json for Spark.
 Alternatively, run the commands yourself
 ```powershell
 # The format is [SERVICE_ACCOUNT_NAME]@[PROJECT_ID].iam.gserviceaccount.com
@@ -55,7 +62,6 @@ gcloud iam service-accounts list
 gcloud iam service-accounts keys create "gcp-credentials/service-account-key.json" `
   --iam-account=[SERVICE_ACCOUNT_NAME]@[PROJECT_ID].iam.gserviceaccount.com
 ```
-note: recreating the service account (i.e. `terraform apply`after a `terraform destroy`) will invalidate the previous token. just run the `generate-gcp-key.ps1` script again.
 
 ### 3. Open Unity Project
 
