@@ -86,7 +86,7 @@ module "ethereal_seer" {
 
 module "post_run_commentary" {
   source = "./modules/post_run_commentary"
-  count = 0 # 0 to disable; 1 to enable
+  count = 1 # 0 to disable; 1 to enable
   depends_on = [
     google_project_service.gcs
   ]
